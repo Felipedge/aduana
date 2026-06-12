@@ -78,18 +78,49 @@ const ESTADO_META = {
 
 const PRODUCTOS_PROHIBIDOS = ["carnes", "lacteos"];
 
+// Generador de ID único para nuevos viajeros (simula RUT)
+function generarRUTemporal() {
+  return `EXT-${Math.floor(Math.random() * 1000000)}`;
+}
+
+// Función para validar formato de email
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// Función para validar RUT chileno (formato básico)
+function isValidRUTChileno(rut) {
+  return /^[0-9]{1,2}\.[0-9]{3}\.[0-9]{3}-[0-9Kk]$/.test(rut);
+}
+
 // ============================== APP ===============================
 export default function SistemaAduanas() {
   const [sesion, setSesion] = useState(null); // null | objeto usuario logueado
   const [viajeros, setViajeros] = useState(SEED_VIAJEROS);
   const [vehiculos, setVehiculos] = useState(SEED_VEHICULOS);
   const [tramites, setTramites] = useState(SEED_TRAMITES);
+  const [usuarios, setUsuarios] = useState(USUARIOS);
+  const [mostrarRegistro, setMostrarRegistro] = useState(false);
 
   return (
     <div style={S.root}>
       <StyleTag />
       <Header sesion={sesion} onExit={() => setSesion(null)} />
-      {!sesion && <Login onLogin={setSesion} />}
+      {!sesion && !mostrarRegistro && (<Login 
+          onLogin={setSesion}
+          onRegistro={() => setMostrarRegistro(true)} />)}
+      {!sesion && mostrarRegistro && (
+        <RegistroViajero
+          onRegistroExitoso={(nuevoUsuario) => {
+            setSesion(nuevoUsuario);
+            setMostrarRegistro(false);
+          }}
+          onCancelar={() => setMostrarRegistro(false)}
+          viajerosExistentes={viajeros}
+          setViajeros={setViajeros}
+          setUsuarios={setUsuarios}
+        />
+      )}
       {sesion?.rol === "viajero" && (
         <ViajeroApp
           sesion={sesion}
@@ -118,7 +149,7 @@ export default function SistemaAduanas() {
 }
 
 // ============================== LOGIN ===============================
-function Login({ onLogin }) {
+function Login({ onLogin, onRegistro }) {
   const [rut, setRut] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -162,6 +193,9 @@ function Login({ onLogin }) {
         <button style={{ ...S.btnPrimary, width: "100%", justifyContent: "center", marginTop: 6 }} onClick={entrar}>
           <LogIn size={16} /> Entrar
         </button>
+        <button style={{ ...S.btnGhost, width: "100%", justifyContent: "center", marginTop: 8 }} onClick={() => onRegistro(true)}>
+          <UserPlus size={16} /> Registrarse como nuevo viajero
+        </button>
 
         <div style={S.loginHint}>
           <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--ink)" }}>Cuentas de demostración</div>
@@ -169,6 +203,322 @@ function Login({ onLogin }) {
           <DemoCred rol="Viajero (menor a cargo)" rut="14.987.654-K" pass="1234" />
           <DemoCred rol="Funcionario" rut="11.222.333-4" pass="func" />
           <DemoCred rol="Administrador" rut="10.000.000-0" pass="admin" />
+        </div>
+      </div>
+    </main>
+  );
+}
+
+// ============================== REGISTRO DE VIAJEROS ===============================
+function RegistroViajero({ onRegistroExitoso, onCancelar, viajerosExistentes, setViajeros, setUsuarios }) {
+  const [formData, setFormData] = useState({
+    // Para chilenos
+    rut: "",
+    // Para extranjeros
+    pasaporte: "",
+    esExtranjero: false,
+    // Datos comunes
+    nombreCompleto: "",
+    nacionalidad: "Chilena",
+    fechaNacimiento: "",
+    email: "",
+    telefono: "",
+    // Contraseña para login
+    password: "",
+    confirmPassword: "",
+  });
+  
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
+
+  const esChileno = !formData.esExtranjero;
+  const identificador = esChileno ? formData.rut : formData.pasaporte;
+
+  const handleChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+    setError("");
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    setError("");
+
+    // Validaciones según el documento de casos de uso
+    if (!formData.nombreCompleto.trim()) {
+      setError("El nombre completo es obligatorio");
+      return;
+    }
+
+    // Validar identificación según tipo
+    if (esChileno) {
+      if (!formData.rut.trim()) {
+        setError("El RUT es obligatorio para ciudadanos chilenos");
+        return;
+      }
+      if (!isValidRUTChileno(formData.rut)) {
+        setError("Formato de RUT inválido. Ejemplo: 12.345.678-9");
+        return;
+      }
+      // Verificar RUT no existente
+      if (viajerosExistentes.some(v => v.rut === formData.rut)) {
+        setError("Ya existe un viajero con este RUT");
+        return;
+      }
+    } else {
+      if (!formData.pasaporte.trim()) {
+        setError("El número de pasaporte es obligatorio para extranjeros");
+        return;
+      }
+      // Verificar pasaporte no existente (usan rut como campo, pero podemos validar)
+      if (viajerosExistentes.some(v => v.rut === formData.pasaporte)) {
+        setError("Ya existe un viajero con este pasaporte");
+        return;
+      }
+    }
+
+    if (!formData.fechaNacimiento) {
+      setError("La fecha de nacimiento es obligatoria");
+      return;
+    }
+
+    if (!isValidEmail(formData.email)) {
+      setError("Email inválido");
+      return;
+    }
+
+    if (!formData.telefono.trim()) {
+      setError("El teléfono es obligatorio");
+      return;
+    }
+
+    if (formData.password.length < 4) {
+      setError("La contraseña debe tener al menos 4 caracteres");
+      return;
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      setError("Las contraseñas no coinciden");
+      return;
+    }
+
+    setCargando(true);
+
+    // Simular validación con Registro Civil (según documento UC-06)
+    setTimeout(() => {
+      // Determinar mayoría de edad (18 años)
+      const fechaNac = new Date(formData.fechaNacimiento);
+      const hoy = new Date();
+      let edad = hoy.getFullYear() - fechaNac.getFullYear();
+      const mesDiff = hoy.getMonth() - fechaNac.getMonth();
+      if (mesDiff < 0 || (mesDiff === 0 && hoy.getDate() < fechaNac.getDate())) {
+        edad--;
+      }
+      const esMenor = edad < 18;
+      // Si es menor de 18, requiere autorización (según RN-05 a RN-09)
+      const requiereAutorizacion = esMenor;
+
+      // Crear nuevo viajero
+      const nuevoViajero = {
+        rut: esChileno ? formData.rut : formData.pasaporte,
+        nombreCompleto: formData.nombreCompleto,
+        nacionalidad: formData.nacionalidad,
+        fechaNacimiento: formData.fechaNacimiento,
+        email: formData.email,
+        telefono: formData.telefono,
+        esMenor: esMenor,
+        requiereAutorizacion: requiereAutorizacion,
+      };
+
+      // Crear usuario para login
+      const nuevoUsuario = {
+        rut: nuevoViajero.rut,
+        password: formData.password,
+        rol: "viajero",
+        nombre: nuevoViajero.nombreCompleto,
+        viajeroRut: nuevoViajero.rut,
+      };
+
+      // Actualizar estados globales
+      setViajeros(prev => [nuevoViajero, ...prev]);
+      setUsuarios(prev => [...prev, nuevoUsuario]);
+
+      setCargando(false);
+      onRegistroExitoso(nuevoUsuario);
+    }, 1500);
+  };
+
+  // Calcular mayoría de edad en tiempo real (para mostrar advertencia)
+  const calcularEdad = () => {
+    if (!formData.fechaNacimiento) return null;
+    const fechaNac = new Date(formData.fechaNacimiento);
+    const hoy = new Date();
+    let edad = hoy.getFullYear() - fechaNac.getFullYear();
+    const mesDiff = hoy.getMonth() - fechaNac.getMonth();
+    if (mesDiff < 0 || (mesDiff === 0 && hoy.getDate() < fechaNac.getDate())) {
+      edad--;
+    }
+    return edad;
+  };
+
+  const edad = calcularEdad();
+  const esMenorPorEdad = edad !== null && edad < 18;
+
+  return (
+    <main style={S.loginWrap}>
+      <div style={{ ...S.loginCard, maxWidth: 500 }}>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}>
+          <EscudoAduanas size={56} />
+        </div>
+        <h1 style={S.loginTitle}>Registro de Viajero</h1>
+        <p style={S.loginSub}>Complete sus datos para realizar trámites fronterizos</p>
+
+        <form onSubmit={handleSubmit}>
+          {/* Tipo de viajero: Chileno / Extranjero */}
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <button
+              type="button"
+              onClick={() => setFormData({ ...formData, esExtranjero: false, rut: "", pasaporte: "" })}
+              style={{ ...S.radio, ...(!formData.esExtranjero ? S.radioActive : {}) }}
+            >
+              🇨🇱 Viajero Chileno
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormData({ ...formData, esExtranjero: true, rut: "", pasaporte: "" })}
+              style={{ ...S.radio, ...(formData.esExtranjero ? S.radioActive : {}) }}
+            >
+              🌎 Viajero Extranjero
+            </button>
+          </div>
+
+          {/* Campo de identificación según tipo */}
+          {esChileno ? (
+            <Field label="RUT (Formato: 12.345.678-9)">
+              <input
+                style={S.input}
+                name="rut"
+                value={formData.rut}
+                onChange={handleChange}
+                placeholder="12.345.678-9"
+              />
+            </Field>
+          ) : (
+            <Field label="Número de Pasaporte">
+              <input
+                style={S.input}
+                name="pasaporte"
+                value={formData.pasaporte}
+                onChange={handleChange}
+                placeholder="AB123456"
+              />
+            </Field>
+          )}
+
+          <Field label="Nombre Completo">
+            <input
+              style={S.input}
+              name="nombreCompleto"
+              value={formData.nombreCompleto}
+              onChange={handleChange}
+              placeholder="Ej: Juan Pérez González"
+            />
+          </Field>
+
+          <Field label="Nacionalidad">
+            <input
+              style={S.input}
+              name="nacionalidad"
+              value={formData.nacionalidad}
+              onChange={handleChange}
+              placeholder="Ej: Chilena, Argentina, Española"
+            />
+          </Field>
+
+          <Field label="Fecha de Nacimiento">
+            <input
+              type="date"
+              style={S.input}
+              name="fechaNacimiento"
+              value={formData.fechaNacimiento}
+              onChange={handleChange}
+            />
+          </Field>
+
+          {edad !== null && esMenorPorEdad && (
+            <Banner
+              tone="warn"
+              icon={AlertTriangle}
+              title="Viajero menor de edad"
+              text="Según RN-05 a RN-09, deberá presentar autorización notarial o judicial para viajar sin ambos padres."
+            />
+          )}
+
+          <Field label="Correo Electrónico">
+            <input
+              style={S.input}
+              name="email"
+              type="email"
+              value={formData.email}
+              onChange={handleChange}
+              placeholder="ejemplo@correo.com"
+            />
+          </Field>
+
+          <Field label="Teléfono">
+            <input
+              style={S.input}
+              name="telefono"
+              value={formData.telefono}
+              onChange={handleChange}
+              placeholder="+56 9 1234 5678"
+            />
+          </Field>
+
+          <Field label="Contraseña (mínimo 4 caracteres)">
+            <input
+              style={S.input}
+              name="password"
+              type="password"
+              value={formData.password}
+              onChange={handleChange}
+              placeholder="••••••"
+            />
+          </Field>
+
+          <Field label="Confirmar Contraseña">
+            <input
+              style={S.input}
+              name="confirmPassword"
+              type="password"
+              value={formData.confirmPassword}
+              onChange={handleChange}
+              placeholder="••••••"
+            />
+          </Field>
+
+          {error && (
+            <div style={S.loginError}>
+              <AlertTriangle size={15} /> {error}
+            </div>
+          )}
+
+          <div style={{ ...S.wizardNav, marginTop: 20 }}>
+            <button type="button" style={S.btnGhost} onClick={onCancelar}>
+              Cancelar
+            </button>
+            <button type="submit" style={{ ...S.btnPrimary, justifyContent: "center" }} disabled={cargando}>
+              {cargando ? "Registrando..." : "Registrarse"}
+            </button>
+          </div>
+        </form>
+
+        <div style={S.loginHint}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>📋 Nota importante</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>
+            • Los datos serán validados con Registro Civil (UC-06) en producción.<br />
+            • Los viajeros menores de edad requieren Autorización Notarial (UC-02).<br />
+            • La declaración SAG es obligatoria para todos los ingresos (UC-03).
+          </div>
         </div>
       </div>
     </main>
