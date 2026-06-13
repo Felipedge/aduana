@@ -131,6 +131,19 @@ function isValidRUTChileno(rut) {
   return /^[0-9]{1,2}\.[0-9]{3}\.[0-9]{3}-[0-9Kk]$/.test(rut);
 }
 
+// Calcula la edad en años a partir de una fecha de nacimiento (YYYY-MM-DD).
+// Se usa para validar mayoría de edad de tutores (RN-05 a RN-09, DEF-A002/A005).
+function calcularEdadAnios(fechaNacimiento) {
+  if (!fechaNacimiento) return null;
+  const nac = new Date(fechaNacimiento);
+  if (isNaN(nac)) return null;
+  const hoy = new Date();
+  let edad = hoy.getFullYear() - nac.getFullYear();
+  const m = hoy.getMonth() - nac.getMonth();
+  if (m < 0 || (m === 0 && hoy.getDate() < nac.getDate())) edad--;
+  return edad;
+}
+
 // ============================== APP ===============================
 export default function SistemaAduanas() {
   const [sesion, setSesion] = useState(null); // null | objeto usuario logueado
@@ -760,6 +773,7 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const [resultadoRC, setResultadoRC] = useState(null); // null | objeto resultado
   const [ingresoManual, setIngresoManual] = useState(false);
   const [vehManual, setVehManual] = useState({ marca: "", modelo: "", anio: "", numeroChasis: "" });
+  const [plazoVehiculo, setPlazoVehiculo] = useState(90); // R.04: máximo 180 días
 
   function validarPatente() {
     const r = consultarRegistroCivil(patenteConsulta);
@@ -780,6 +794,7 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const [tieneMascota, setTieneMascota] = useState(false);
   const [tipoMascota, setTipoMascota] = useState("perro");
   const [chip, setChip] = useState("");
+  const [fechaVacuna, setFechaVacuna] = useState(""); // RN-11: vacuna antirrábica
 
   // AutorizacionNotarial (sólo menor)
   const [apoderado, setApoderado] = useState("");
@@ -790,17 +805,36 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const productoProhibido = tieneAlimentos && esProductoProhibido(tipoProducto);
   const totalPasos = 4;
 
+  // Validación 1: si el viajero requiere autorización (es menor), quien gestiona
+  // el trámite (actor) debe ser mayor de 18. Si el propio actor es el menor,
+  // su edad será < 18 y se bloquea la autogestión de la autorización.
+  const edadActor = calcularEdadAnios(actor.fechaNacimiento);
+  const tutorMenorDeEdad = actor.requiereAutorizacion && edadActor != null && edadActor < 18;
+
+  // Validación 8: cantidad debe ser numérica positiva (acepta "2 kg", "2kg", "2")
+  const cantidadNum = parseFloat(String(cantidad).replace(",", ".").replace(/[^\d.]/g, ""));
+  const cantidadInvalida = tieneAlimentos && cantidad.trim() && (isNaN(cantidadNum) || cantidadNum <= 0);
+
+  // Validación 2 (RN-11): la vacuna antirrábica debe tener al menos 30 días
+  // de antigüedad respecto a hoy.
+  let vacunaInvalida = false;
+  if (tieneMascota && fechaVacuna) {
+    const dias = Math.floor((new Date() - new Date(fechaVacuna)) / (1000 * 60 * 60 * 24));
+    vacunaInvalida = isNaN(dias) || dias < 30;
+  }
+
   // CP-WEB-SAG-003: campos obligatorios en la declaración SAG
   const sagIncompleto =
-    (tieneAlimentos && (!paisOrigen.trim() || !cantidad.trim())) ||
-    (tieneMascota && !chip.trim());
+    (tieneAlimentos && (!paisOrigen.trim() || !cantidad.trim() || cantidadInvalida)) ||
+    (tieneMascota && (!chip.trim() || !fechaVacuna || vacunaInvalida));
 
   // Bloqueo de avance en paso 1 según validación de patente (CP-WEB-VEH-002/003)
   const vehiculoBloquea =
     llevaVehiculo && (
       !resultadoRC ||                                   // aún no valida
       (resultadoRC.encontrado && resultadoRC.tieneRestricciones) || // restricción legal
-      (!resultadoRC.encontrado && !ingresoManual)       // no encontrada y sin ingreso manual
+      (!resultadoRC.encontrado && !ingresoManual) ||    // no encontrada y sin ingreso manual
+      (plazoVehiculo < 1 || plazoVehiculo > 180)        // R.04: plazo fuera de rango
     );
 
   function finalizar() {
@@ -811,13 +845,14 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
       tieneAlimentos, tipoProducto: tieneAlimentos ? tipoProducto : null, paisOrigen,
       cantidadEstimada: cantidad || "—", tieneMascota,
       tipoMascota: tieneMascota ? tipoMascota : null, chipIdentificacion: tieneMascota ? chip : null,
+      fechaVacunaMascota: tieneMascota ? fechaVacuna : null,
     });
     if (llevaVehiculo && patente) {
       const esManual = ingresoManual && resultadoRC && !resultadoRC.encontrado;
       documentos.push({
         tipo: "FormularioVehiculoAcuerdo", idDocumento: Math.floor(Math.random() * 9000) + 1000,
-        estado: "pendiente", fechaEmision: today(), fechaVencimiento: addDays(today(), 90),
-        plazoDias: 90, paisDestino: "Argentina", fechaSalida: today(), fechaRetorno: addDays(today(), 80),
+        estado: "pendiente", fechaEmision: today(), fechaVencimiento: addDays(today(), plazoVehiculo),
+        plazoDias: plazoVehiculo, paisDestino: "Argentina", fechaSalida: today(), fechaRetorno: addDays(today(), plazoVehiculo - 10),
         lugarSalida: "Paso Los Libertadores",
         // CP-WEB-VEH-003: si fue ingreso manual, queda con validación pendiente
         validacionPendiente: !!esManual,
@@ -850,6 +885,12 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
     <div style={S.wizard}>
       <Stepper paso={paso} total={totalPasos}
         labels={["Tipo de viaje", "Declaración SAG", actor.requiereAutorizacion ? "Autorización" : "Vehículo", "Confirmar"]} />
+
+      {/* Validación 1 (DEF-A002, RN-05 a RN-09): gestor menor de edad */}
+      {tutorMenorDeEdad && (
+        <Banner tone="danger" icon={XCircle} title="Debe ser mayor de 18 años"
+          text="La autorización de un menor debe ser gestionada por un adulto responsable. Este perfil corresponde a un menor de edad, por lo que no puede completar la autorización por sí mismo." />
+      )}
 
       {paso === 1 && (
         <FormBlock title="Tipo de viaje" sub="TramiteFrontera.tipoViaje">
@@ -933,11 +974,20 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
                 </select>
               </Field>
               <Field label="Chip de identificación"><input style={S.input} placeholder="N° de microchip" value={chip} onChange={(e) => setChip(e.target.value)} /></Field>
+              <Field label="Fecha de vacuna antirrábica"><input type="date" style={S.input} value={fechaVacuna} onChange={(e) => setFechaVacuna(e.target.value)} /></Field>
             </>
           )}
-          {sagIncompleto && (
+          {cantidadInvalida && (
+            <Banner tone="danger" icon={XCircle} title="Cantidad inválida"
+              text="La cantidad debe ser un número positivo (ej: 2 kg)." />
+          )}
+          {vacunaInvalida && (
+            <Banner tone="danger" icon={XCircle} title="Vacuna no vigente"
+              text="La vacuna antirrábica debe tener al menos 30 días de antigüedad antes del viaje (RN-11)." />
+          )}
+          {sagIncompleto && !cantidadInvalida && !vacunaInvalida && (
             <Banner tone="warn" icon={AlertTriangle} title="Campos obligatorios incompletos"
-              text="Completa el país de origen y la cantidad del producto, y el chip de la mascota, antes de continuar." />
+              text="Completa el país de origen y la cantidad del producto, y el chip y la fecha de vacuna de la mascota, antes de continuar." />
           )}
         </FormBlock>
       )}
@@ -955,7 +1005,17 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
       {paso === 3 && !actor.requiereAutorizacion && (
         <FormBlock title="Vehículo" sub="FormularioVehiculoAcuerdo">
           {llevaVehiculo
-            ? <p style={S.muted}>Se generará el Formulario de Vehículo bajo Acuerdo para la patente <b>{patente}</b> (vigencia 90 días, dos copias).</p>
+            ? <>
+                <p style={S.muted}>Se generará el Formulario de Vehículo bajo Acuerdo para la patente <b>{patente}</b> (dos copias).</p>
+                <Field label="Plazo de permanencia (días)">
+                  <input type="number" style={S.input} value={plazoVehiculo}
+                    onChange={(e) => setPlazoVehiculo(parseInt(e.target.value) || 0)} />
+                </Field>
+                {(plazoVehiculo < 1 || plazoVehiculo > 180) && (
+                  <Banner tone="danger" icon={XCircle} title="Plazo inválido"
+                    text="El plazo máximo de admisión temporal del vehículo es de 180 días corridos (Acuerdo Chileno-Argentino, R.04)." />
+                )}
+              </>
             : <p style={S.muted}>No registraste vehículo. Puedes volver al paso 1 para añadir uno.</p>}
         </FormBlock>
       )}
@@ -989,7 +1049,10 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
               onClick={() => setPaso(paso + 1)}>
               Continuar <ArrowRight size={16} />
             </button>
-          : <button style={S.btnPrimary} onClick={finalizar}><CheckCircle2 size={16} /> Iniciar trámite</button>}
+          : <button
+              style={{ ...S.btnPrimary, ...(tutorMenorDeEdad ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
+              disabled={tutorMenorDeEdad}
+              onClick={finalizar}><CheckCircle2 size={16} /> Iniciar trámite</button>}
       </div>
     </div>
   );
@@ -1338,6 +1401,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
       {(creating || editing) && esViajeros && (
         <ViajeroForm
           original={editing}
+          existentes={viajeros}
           onSave={guardarViajero}
           onCancel={() => { setEditing(null); setCreating(false); }}
         />
@@ -1345,6 +1409,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
       {(creating || editing) && !esViajeros && (
         <VehiculoForm
           original={editing}
+          existentes={vehiculos}
           onSave={guardarVehiculo}
           onCancel={() => { setEditing(null); setCreating(false); }}
         />
@@ -1404,13 +1469,37 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
 }
 
 // ---- Formulario de Viajero (crear / editar) ----
-function ViajeroForm({ original, onSave, onCancel }) {
+function ViajeroForm({ original, existentes = [], onSave, onCancel }) {
   const [f, setF] = useState(original || {
     rut: "", nombreCompleto: "", nacionalidad: "Chilena", fechaNacimiento: "",
     email: "", telefono: "", esMenor: false, requiereAutorizacion: false,
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
-  const valido = f.rut.trim() && f.nombreCompleto.trim();
+
+  // Validaciones
+  const errores = [];
+  if (!f.rut.trim()) errores.push("El RUT es obligatorio.");
+  else if (!isValidRUTChileno(f.rut)) errores.push("El RUT no tiene un formato válido (ej: 12.345.678-9).");
+  if (!f.nombreCompleto.trim()) errores.push("El nombre completo es obligatorio.");
+  if (f.email.trim() && !isValidEmail(f.email)) errores.push("El email no tiene un formato válido.");
+  // RUT duplicado (solo al crear, o si se cambió el RUT al editar)
+  const rutDuplicado = existentes.some(
+    (v) => v.rut.toLowerCase() === f.rut.trim().toLowerCase() && (!original || v.rut !== original.rut)
+  );
+  if (rutDuplicado) errores.push("Ya existe un viajero con ese RUT.");
+
+  const edad = calcularEdadAnios(f.fechaNacimiento);
+  const valido = errores.length === 0;
+
+  function guardar() {
+    // Recalcula menor de edad y autorización a partir de la fecha real
+    const datos = { ...f };
+    if (edad != null) {
+      datos.esMenor = edad < 18;
+      datos.requiereAutorizacion = edad < 18;
+    }
+    onSave(datos, original);
+  }
 
   return (
     <div style={S.adminForm}>
@@ -1426,27 +1515,48 @@ function ViajeroForm({ original, onSave, onCancel }) {
         <Field label="Email"><input style={S.input} value={f.email} onChange={(e) => set("email", e.target.value)} /></Field>
         <Field label="Teléfono"><input style={S.input} value={f.telefono} onChange={(e) => set("telefono", e.target.value)} /></Field>
       </div>
-      <div style={{ display: "flex", gap: 20, marginTop: 14, flexWrap: "wrap" }}>
-        <Toggle label="Es menor de edad" checked={f.esMenor} onChange={(v) => set("esMenor", v)} />
-        <Toggle label="Requiere autorización" checked={f.requiereAutorizacion} onChange={(v) => set("requiereAutorizacion", v)} />
-      </div>
+      {edad != null && (
+        <p style={{ ...S.muted, marginTop: 10 }}>
+          Edad calculada: <b>{edad} años</b> · {edad < 18 ? "menor de edad (requiere autorización notarial)" : "mayor de edad"}.
+        </p>
+      )}
+      {errores.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {errores.map((er, i) => (
+            <div key={i} style={S.loginError}><AlertTriangle size={14} /> {er}</div>
+          ))}
+        </div>
+      )}
       <div style={S.wizardNav}>
         <button style={S.btnGhost} onClick={onCancel}>Cancelar</button>
-        <button style={{ ...S.btnPrimary, opacity: valido ? 1 : 0.5 }} disabled={!valido}
-          onClick={() => onSave(f, original)}><Save size={16} /> Guardar</button>
+        <button style={{ ...S.btnPrimary, opacity: valido ? 1 : 0.5, cursor: valido ? "pointer" : "not-allowed" }} disabled={!valido}
+          onClick={guardar}><Save size={16} /> Guardar</button>
       </div>
     </div>
   );
 }
 
 // ---- Formulario de Vehículo (crear / editar) ----
-function VehiculoForm({ original, onSave, onCancel }) {
+function VehiculoForm({ original, existentes = [], onSave, onCancel }) {
   const [f, setF] = useState(original || {
     patente: "", marca: "", modelo: "", anio: 2024, color: "",
     numeroChasis: "", esDiplomatico: false, tieneRestricciones: false,
   });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
-  const valido = f.patente.trim() && f.marca.trim();
+
+  const anioActual = new Date().getFullYear();
+  const errores = [];
+  if (!f.patente.trim()) errores.push("La patente es obligatoria.");
+  if (!f.marca.trim()) errores.push("La marca es obligatoria.");
+  if (!f.modelo.trim()) errores.push("El modelo es obligatorio.");
+  if (!f.anio || f.anio < 1900 || f.anio > anioActual + 1)
+    errores.push(`El año debe estar entre 1900 y ${anioActual + 1}.`);
+  const patenteDuplicada = existentes.some(
+    (v) => v.patente.toLowerCase() === f.patente.trim().toLowerCase() && (!original || v.patente !== original.patente)
+  );
+  if (patenteDuplicada) errores.push("Ya existe un vehículo con esa patente.");
+
+  const valido = errores.length === 0;
 
   return (
     <div style={S.adminForm}>
@@ -1466,6 +1576,13 @@ function VehiculoForm({ original, onSave, onCancel }) {
         <Toggle label="Es diplomático" checked={f.esDiplomatico} onChange={(v) => set("esDiplomatico", v)} />
         <Toggle label="Tiene restricciones" checked={f.tieneRestricciones} onChange={(v) => set("tieneRestricciones", v)} />
       </div>
+      {errores.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {errores.map((er, i) => (
+            <div key={i} style={S.loginError}><AlertTriangle size={14} /> {er}</div>
+          ))}
+        </div>
+      )}
       <div style={S.wizardNav}>
         <button style={S.btnGhost} onClick={onCancel}>Cancelar</button>
         <button style={{ ...S.btnPrimary, opacity: valido ? 1 : 0.5 }} disabled={!valido}
@@ -1531,15 +1648,21 @@ function TramiteCard({ t, viajero, vehiculo, onClick, readOnly }) {
 function DocRow({ d }) {
   const meta = TIPOS_DOC[d.tipo];
   const Icon = meta.icon;
+  // Validación 3 (R.03): documento vencido si su fecha de vencimiento ya pasó.
+  const vencido = d.fechaVencimiento && String(d.fechaVencimiento).slice(0, 10) < today();
   return (
     <div style={S.docRow}>
       <div style={{ ...S.docIcon, background: meta.color + "1f", color: meta.color }}><Icon size={16} /></div>
       <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 600, fontSize: 13.5 }}>{meta.label}</div>
+        <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+          {meta.label}
+          {vencido && <span style={{ ...S.menorBadge, background: "#9a2f2f22", color: "#9a2f2f", marginLeft: 8 }}>Vencido</span>}
+        </div>
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
           {d.tipo === "DeclaracionSAG" && (d.tieneAlimentos ? `${d.tipoProducto} · ${d.cantidadEstimada}` : "Sin alimentos") + (d.tieneMascota ? ` · mascota (${d.tipoMascota})` : "")}
           {d.tipo === "FormularioVehiculoAcuerdo" && `${d.paisDestino} · ${d.plazoDias} días`}
           {d.tipo === "AutorizacionNotarial" && `${d.numeroNotaria} · ${d.tipoAutorizacion}`}
+          {d.fechaVencimiento && ` · vence ${fmtFechaCL(d.fechaVencimiento)}`}
         </div>
       </div>
       <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: d.estado === "validado" ? "#2f6b40" : d.estado === "rechazado" ? "#9a2f2f" : "var(--muted)" }}>
