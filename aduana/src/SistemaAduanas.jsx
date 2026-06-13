@@ -26,7 +26,7 @@ import {
 // ---------- Datos semilla (instancias de las clases del diagrama) ----------
 const SEED_VIAJEROS = [
   { rut: "18.345.678-9", nombreCompleto: "Camila Rojas Pérez", nacionalidad: "Chilena", fechaNacimiento: "1995-03-12", email: "camila.rojas@mail.cl", telefono: "+56 9 8123 4567", esMenor: false, requiereAutorizacion: false },
-  { rut: "26.111.222-3", nombreCompleto: "Mateo Rojas Pérez", nacionalidad: "Chilena", fechaNacimiento: "2014-07-08", email: "tutor@mail.cl", telefono: "+56 9 8123 4567", esMenor: true, requiereAutorizacion: true },
+  { rut: "26.111.222-3", nombreCompleto: "Mateo Rojas Pérez", nacionalidad: "Chilena", fechaNacimiento: "2014-07-08", email: "camila.rojas@mail.cl", telefono: "+56 9 8123 4567", esMenor: true, requiereAutorizacion: true, tutorRut: "18.345.678-9" },
   { rut: "14.987.654-K", nombreCompleto: "John Carter", nacionalidad: "Estadounidense", fechaNacimiento: "1980-11-30", email: "jcarter@mail.com", telefono: "+1 202 555 0143", esMenor: false, requiereAutorizacion: false },
 ];
 
@@ -300,8 +300,8 @@ function Login({ usuarios, onLogin, onRegistro }) {
 
         <div style={S.loginHint}>
           <div style={{ fontWeight: 700, marginBottom: 6, color: "var(--ink)" }}>Cuentas de demostración</div>
-          <DemoCred rol="Viajero" rut="18.345.678-9" pass="1234" />
-          <DemoCred rol="Viajero (menor a cargo)" rut="14.987.654-K" pass="1234" />
+          <DemoCred rol="Viajero (madre/tutora)" rut="18.345.678-9" pass="1234" />
+          <DemoCred rol="Viajero extranjero" rut="14.987.654-K" pass="1234" />
           <DemoCred rol="Funcionario" rut="11.222.333-4" pass="func" />
           <DemoCred rol="Administrador" rut="10.000.000-0" pass="admin" />
         </div>
