@@ -11,7 +11,7 @@ import {
   Users, Search, CheckCircle2, XCircle, Clock, AlertTriangle,
   QrCode, ChevronRight, Plus, Filter, Download, Eye,
   Apple, Stamp, ArrowRight, X, LogIn, LogOut,
-  Pencil, Trash2, UserPlus, Save, Database
+  Pencil, Trash2, UserPlus, Save, Database, Settings,
 } from "lucide-react";
 
 /* =========================================================================
@@ -36,13 +36,21 @@ const SEED_VEHICULOS = [
 ];
 
 // Usuarios de demo para el login. password en texto plano SOLO por ser prototipo.
-// rol: 'viajero' | 'funcionario' | 'admin'. Para viajeros, viajeroRut enlaza a SEED_VIAJEROS.
+// Roles: 'viajero' | 'funcionario' | 'admin' | 'sag' | 'pdi' | 'registro_civil'
+// Los sistemas externos (sag, pdi, registro_civil) son simulados pero tienen permisos específicos.
 const USUARIOS = [
   { rut: "18.345.678-9", password: "1234", rol: "viajero", nombre: "Camila Rojas Pérez", viajeroRut: "18.345.678-9" },
   { rut: "14.987.654-K", password: "1234", rol: "viajero", nombre: "John Carter", viajeroRut: "14.987.654-K" },
-  { rut: "11.222.333-4", password: "func", rol: "funcionario", nombre: "Pedro Soto (Funcionario)" },
+  { rut: "11.222.333-4", password: "func", rol: "funcionario", nombre: "Pedro Soto (Funcionario)", puestoFronterizo: "Los Libertadores" },
   { rut: "10.000.000-0", password: "admin", rol: "admin", nombre: "Admin del Sistema" },
+  // Sistemas externos simulados (generalmente no logueados, pero aquí incluidos para auditoría)
+  { rut: "SAG-001", password: "sag2026", rol: "sag", nombre: "Sistema SAG", institucion: "Servicio Agrícola y Ganadero" },
+  { rut: "PDI-001", password: "pdi2026", rol: "pdi", nombre: "Sistema PDI", institucion: "Policía de Investigaciones" },
+  { rut: "RC-001", password: "rc2026", rol: "registro_civil", nombre: "Sistema Registro Civil", institucion: "Servicio de Registro Civil" },
 ];
+
+// Auditoría global: registro de todas las acciones por usuario, rol, timestamp y detalles
+let AUDITORIA = [];
 
 
 let TRAMITE_SEQ = 3;
@@ -144,6 +152,35 @@ function calcularEdadAnios(fechaNacimiento) {
   return edad;
 }
 
+// Auditoría: registra acciones de usuarios con detalles de rol, acción y timestamp
+function registrarAuditoria(sesion, accion, detalles = {}) {
+  if (!sesion) return; // No registrar acciones sin usuario
+  AUDITORIA.push({
+    timestamp: nowStr(),
+    rutUsuario: sesion.rut,
+    nombre: sesion.nombre,
+    rol: sesion.rol,
+    accion,
+    detalles,
+  });
+  // Limitar a últimas 1000 acciones para evitar desbordamiento en memoria
+  if (AUDITORIA.length > 1000) AUDITORIA.shift();
+}
+
+// Permisos granulares por rol y tipo de documento
+// Retorna true si el rol puede validar ese tipo de documento
+function puedeValidarDocumento(rol, tipoDocumento) {
+  const permisosPorRol = {
+    sag: ["DeclaracionSAG"], // SAG solo valida declaraciones de alimentos/mascotas
+    pdi: ["AutorizacionNotarial"], // PDI solo valida autorizaciones de menores
+    registro_civil: ["FormularioVehiculoAcuerdo"], // Registro Civil solo valida vehículos
+    funcionario: ["DeclaracionSAG", "AutorizacionNotarial", "FormularioVehiculoAcuerdo"], // Funcionario valida todo
+    admin: ["DeclaracionSAG", "AutorizacionNotarial", "FormularioVehiculoAcuerdo"], // Admin valida todo
+  };
+  const permisos = permisosPorRol[rol] || [];
+  return permisos.includes(tipoDocumento);
+}
+
 // ============================== APP ===============================
 export default function SistemaAduanas() {
   const [sesion, setSesion] = useState(null); // null | objeto usuario logueado
@@ -205,10 +242,16 @@ export default function SistemaAduanas() {
   return (
     <div style={S.root}>
       <StyleTag />
-      <Header sesion={sesion} onExit={() => setSesion(null)} />
+      <Header sesion={sesion} onExit={() => {
+        registrarAuditoria(sesion, "LOGOUT", {});
+        setSesion(null);
+      }} />
       {!sesion && !mostrarRegistro && (<Login 
           usuarios={usuarios}
-          onLogin={setSesion}
+          onLogin={(usuario) => {
+            setSesion(usuario);
+            registrarAuditoria(usuario, "LOGIN", { metodo: "credenciales RUT/contraseña" });
+          }}
           onRegistro={() => setMostrarRegistro(true)} />)}
       {!sesion && mostrarRegistro && (
         <RegistroViajero
@@ -231,21 +274,112 @@ export default function SistemaAduanas() {
       )}
       {sesion?.rol === "funcionario" && (
         <FuncionarioApp
+          sesion={sesion}
           viajeros={viajeros} vehiculos={vehiculos}
           tramites={tramites} setTramites={setTramites}
         />
       )}
       {sesion?.rol === "admin" && (
         <AdminApp
+          sesion={sesion}
           viajeros={viajeros} setViajeros={setViajeros}
           vehiculos={vehiculos} setVehiculos={setVehiculos}
           tramites={tramites}
         />
       )}
+      {/* Vistas de sistemas externos simulados */}
+      {(sesion?.rol === "sag" || sesion?.rol === "pdi" || sesion?.rol === "registro_civil") && (
+        <SistemaExternoApp sesion={sesion} tramites={tramites} setTramites={setTramites} viajeros={viajeros} vehiculos={vehiculos} />
+      )}
       <footer style={S.footer}>
         Prototipo · Sistema de Aduanas — modelado a partir del diagrama de clases
       </footer>
     </div>
+  );
+}
+
+// ============================== SISTEMAS EXTERNOS (SAG, PDI, REGISTRO CIVIL) ===============================
+function SistemaExternoApp({ sesion, tramites, setTramites, viajeros, vehiculos }) {
+  const rol = sesion.rol;
+  const tipoDocPermitido = rol === "sag" ? "DeclaracionSAG" : rol === "pdi" ? "AutorizacionNotarial" : "FormularioVehiculoAcuerdo";
+  const labelRol = rol === "sag" ? "SAG — Servicio Agrícola y Ganadero" : rol === "pdi" ? "PDI — Policía de Investigaciones" : "Registro Civil";
+  const descripcion = rol === "sag"
+    ? "Validar declaraciones juradas de alimentos y mascotas (UC-12)."
+    : rol === "pdi"
+    ? "Validar autorizaciones notariales de menores (UC-09)."
+    : "Validar datos de vehículos y personas (UC-06).";
+
+  // Documentos pendientes que este sistema puede validar
+  const documentosPendientes = [];
+  tramites.forEach((t) => {
+    t.documentos.forEach((d) => {
+      if (d.tipo === tipoDocPermitido && (d.estado === "en_revision" || d.estado === "pendiente")) {
+        const viajero = viajeros.find((v) => v.rut === t.viajeroRut);
+        documentosPendientes.push({ ...d, idTramite: t.idTramite, viajeroNombre: viajero?.nombreCompleto, viajeroRut: t.viajeroRut });
+      }
+    });
+  });
+
+  function validarDocumento(idTramite, idDocumento, resultado) {
+    setTramites((prev) => prev.map((t) => {
+      if (t.idTramite !== idTramite) return t;
+      const docs = t.documentos.map((d) =>
+        d.idDocumento === idDocumento ? { ...d, estado: resultado, validadoPor: sesion.nombre, fechaValidacion: nowStr() } : d
+      );
+      const todosValidados = docs.every((d) => d.estado === "validado");
+      const algunoRechazado = docs.some((d) => d.estado === "rechazado");
+      const nuevoEstado = algunoRechazado ? "rechazado" : todosValidados ? "aprobado" : t.estado;
+      const actualizado = { ...t, documentos: docs, estado: nuevoEstado };
+      guardarTramite(actualizado).catch(e => console.error(e));
+      return actualizado;
+    }));
+    registrarAuditoria(sesion, resultado === "validado" ? "VALIDAR_DOCUMENTO" : "RECHAZAR_DOCUMENTO", {
+      idTramite, idDocumento, resultado, tipoDoc: tipoDocPermitido
+    });
+  }
+
+  return (
+    <main style={S.main}>
+      <div style={{ ...S.panel, marginBottom: 16 }}>
+        <div style={S.panelHead}>
+          <h2 style={S.panelTitle}>{labelRol}</h2>
+          <span style={S.formSub}>{descripcion}</span>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <KV k="Tipo de documento" v={TIPOS_DOC[tipoDocPermitido]?.label} />
+          <KV k="Pendientes de validación" v={documentosPendientes.length} />
+          <KV k="Institución" v={sesion.institucion || labelRol} />
+        </div>
+      </div>
+
+      {documentosPendientes.length === 0 ? (
+        <EmptyState text="No hay documentos pendientes de validación para este sistema." />
+      ) : (
+        <div style={S.tableWrap}>
+          {documentosPendientes.map((d) => (
+            <div key={`${d.idTramite}-${d.idDocumento}`} style={{ ...S.adminRow, gap: 12, padding: "12px 14px" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>
+                  {TIPOS_DOC[d.tipo]?.label} — Doc #{d.idDocumento}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                  Trámite #{d.idTramite} · {d.viajeroNombre} ({d.viajeroRut})
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                  Emitido: {d.fechaEmision} · Vence: {d.fechaVencimiento || "N/A"}
+                </div>
+              </div>
+              <button style={S.btnPrimary} onClick={() => validarDocumento(d.idTramite, d.idDocumento, "validado")}>
+                <CheckCircle2 size={14} /> Validar
+              </button>
+              <button style={S.btnDanger} onClick={() => validarDocumento(d.idTramite, d.idDocumento, "rechazado")}>
+                <XCircle size={14} /> Rechazar
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </main>
   );
 }
 
@@ -304,6 +438,9 @@ function Login({ usuarios, onLogin, onRegistro }) {
           <DemoCred rol="Viajero extranjero" rut="14.987.654-K" pass="1234" />
           <DemoCred rol="Funcionario" rut="11.222.333-4" pass="func" />
           <DemoCred rol="Administrador" rut="10.000.000-0" pass="admin" />
+          <DemoCred rol="SAG (sistema externo)" rut="SAG-001" pass="sag2026" />
+          <DemoCred rol="PDI (sistema externo)" rut="PDI-001" pass="pdi2026" />
+          <DemoCred rol="Registro Civil (externo)" rut="RC-001" pass="rc2026" />
         </div>
       </div>
     </main>
@@ -753,7 +890,12 @@ function ViajeroApp({ sesion, viajeros, vehiculos, tramites, setTramites }) {
       {view === "nuevo" && (
         <NuevoTramite
           actor={actor} vehiculos={vehiculos}
-          onCreate={(t) => { guardarTramite(t).catch(e => console.error("Error guardando trámite:", e)); setTramites((p) => [t, ...p]); setView("inicio"); }}
+          onCreate={(t) => {
+            guardarTramite(t).catch(e => console.error("Error guardando trámite:", e));
+            setTramites((p) => [t, ...p]);
+            registrarAuditoria(sesion, "CREAR_TRAMITE", { idTramite: t.idTramite, tipo: t.tipoViaje, viajeroRut: t.viajeroRut });
+            setView("inicio");
+          }}
           onCancel={() => setView("inicio")}
         />
       )}
@@ -1058,11 +1200,107 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   );
 }
 
+// ============================== UC-04: ESCANEO DE QR EN FRONTERA ===============================
+function EscaneoQRFrontera({ qrCode, setQrCode, tramites, viajeros, vehiculos }) {
+  const [tramiteEncontrado, setTramiteEncontrado] = useState(null);
+  
+  function buscarTramitePorQR() {
+    if (!qrCode.trim()) return;
+    const t = tramites.find((x) => x.qrCode.toLowerCase() === qrCode.trim().toLowerCase());
+    setTramiteEncontrado(t || null);
+  }
+
+  function onKey(e) { if (e.key === "Enter") buscarTramitePorQR(); }
+
+  return (
+    <div style={S.wizard}>
+      <h2 style={{ ...S.formTitle, marginBottom: 12 }}>Validación Rápida en Frontera (UC-04)</h2>
+      <p style={{ ...S.muted, marginBottom: 20 }}>
+        Escanea o ingresa el código QR del viajero. El sistema validará su documentación automáticamente.
+      </p>
+
+      <div style={{ marginBottom: 20 }}>
+        <Field label="Código QR">
+          <input
+            style={S.input}
+            value={qrCode}
+            onChange={(e) => setQrCode(e.target.value)}
+            onKeyDown={onKey}
+            placeholder="QR-AD-0001"
+            autoFocus
+          />
+        </Field>
+        <button style={S.btnPrimary} onClick={buscarTramitePorQR}>
+          <QrCode size={16} /> Escanear
+        </button>
+      </div>
+
+      {tramiteEncontrado ? (
+        <div>
+          <div style={{ ...S.panel, background: tramiteEncontrado.estado === "aprobado" ? "#d8f0dd" : "#fbf2cf" }}>
+            <EstadoPill estado={tramiteEncontrado.estado} />
+            <h3 style={{ ...S.formTitle, marginTop: 12, marginBottom: 6 }}>
+              {viajeros.find((v) => v.rut === tramiteEncontrado.viajeroRut)?.nombreCompleto}
+            </h3>
+            <KV k="RUT" v={tramiteEncontrado.viajeroRut} />
+            <KV k="Tipo de viaje" v={tramiteEncontrado.tipoViaje === "salida" ? "Salida" : "Entrada"} />
+            <KV k="Documentos" v={tramiteEncontrado.documentos.length} />
+            {tramiteEncontrado.vehiculoPatente && <KV k="Vehículo" v={tramiteEncontrado.vehiculoPatente} />}
+          </div>
+
+          {/* Validación de documentos */}
+          <div style={{ ...S.panel, marginTop: 16, borderLeft: "4px solid #013171" }}>
+            <h3 style={S.panelTitle}>Validación de documentos</h3>
+            {tramiteEncontrado.documentos.map((d) => {
+              const vencido = d.fechaVencimiento && String(d.fechaVencimiento).slice(0, 10) < today();
+              const docOK = d.estado === "validado" && !vencido;
+              return (
+                <div key={d.idDocumento} style={{ padding: "8px 0", borderBottom: "1px solid var(--line)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{TIPOS_DOC[d.tipo]?.label}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: docOK ? "#2f6b40" : vencido ? "#9a2f2f" : "var(--muted)" }}>
+                    {vencido ? "VENCIDO" : d.estado.toUpperCase()}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {tramiteEncontrado.estado === "aprobado" ? (
+            <Banner tone="ok" icon={CheckCircle2} title="Documento completo y válido"
+              text="El viajero puede proceder. Presione 'Autorizar paso' para registrar el cruce." />
+          ) : tramiteEncontrado.estado === "pendiente" ? (
+            <Banner tone="warn" icon={AlertTriangle} title="Documentación pendiente"
+              text="Este trámite aún no ha sido revisado. Debe pasar por bandeja de revisión primero." />
+          ) : (
+            <Banner tone="danger" icon={XCircle} title="Trámite rechazado"
+              text="Este viajero ha sido rechazado. No se permite el paso." />
+          )}
+
+          <div style={S.wizardNav}>
+            <button style={S.btnGhost} onClick={() => { setQrCode(""); setTramiteEncontrado(null); }}>
+              Escanear otro QR
+            </button>
+            {tramiteEncontrado.estado === "aprobado" && (
+              <button style={S.btnPrimary} onClick={() => alert("✓ Cruce registrado en la base de datos")}>
+                <CheckCircle2 size={16} /> Autorizar paso
+              </button>
+            )}
+          </div>
+        </div>
+      ) : qrCode && !tramiteEncontrado ? (
+        <Banner tone="danger" icon={XCircle} title="QR no encontrado"
+          text="No se encontró un trámite asociado a este código. Verifique que esté escaneando un QR válido." />
+      ) : null}
+    </div>
+  );
+}
+
 // ============================== FUNCIONARIO ===============================
-function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
-  const [view, setView] = useState("bandeja"); // bandeja | informes
+function FuncionarioApp({ sesion, viajeros, vehiculos, tramites, setTramites }) {
+  const [view, setView] = useState("bandeja"); // bandeja | escaneo_qr | informes
   const [filtro, setFiltro] = useState("todos");
   const [sel, setSel] = useState(null);
+  const [qrEscaneado, setQrEscaneado] = useState(""); // UC-04
 
   const filtrados = useMemo(
     () => tramites.filter((t) => filtro === "todos" || t.estado === filtro),
@@ -1081,6 +1319,10 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
       if (modificado) guardarTramite(modificado).catch(e => console.error("Error actualizando trámite:", e));
       return actualizados;
     });
+    // Auditoría: registrar cambio de estado
+    registrarAuditoria(sesion, estado === "aprobado" ? "APROBAR_TRAMITE" : estado === "rechazado" ? "RECHAZAR_TRAMITE" : "REVISAR_TRAMITE", {
+      idTramite, nuevoEstado: estado, observaciones: obs || ""
+    });
     setSel(null);
   }
 
@@ -1090,6 +1332,7 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
         actorLabel="Funcionario de turno"
         tabs={[
           { id: "bandeja", label: "Bandeja de revisión", icon: FileCheck },
+          { id: "escaneo_qr", label: "Escanear QR (UC-04)", icon: QrCode },
           { id: "informes", label: "Informes estadísticos", icon: BarChart3 },
         ]}
         active={view} onChange={setView}
@@ -1120,9 +1363,15 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
 
       {view === "informes" && <Informes tramites={tramites} />}
 
+      {view === "escaneo_qr" && (
+        <EscaneoQRFrontera qrCode={qrEscaneado} setQrCode={setQrEscaneado} 
+          tramites={tramites} viajeros={viajeros} vehiculos={vehiculos} />
+      )}
+
       {sel && (
         <RevisionDrawer
           t={sel}
+          sesion={sesion}
           viajero={viajeros.find((v) => v.rut === sel.viajeroRut)}
           vehiculo={vehiculos.find((v) => v.patente === sel.vehiculoPatente)}
           onClose={() => setSel(null)}
@@ -1136,11 +1385,19 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
 }
 
 // ---- Drawer de revisión: valida documentos y cambia estado ----
-function RevisionDrawer({ t, viajero, vehiculo, onClose, onAprobar, onRechazar, onRevisar }) {
+function RevisionDrawer({ t, sesion, viajero, vehiculo, onClose, onAprobar, onRechazar, onRevisar }) {
   const [obs, setObs] = useState(t.observaciones || "");
   const hayProhibido = t.documentos.some(
     (d) => d.tipo === "DeclaracionSAG" && d.tieneAlimentos && esProductoProhibido(d.tipoProducto)
   );
+
+  // Permisos granulares: qué documentos puede validar este rol
+  const permisosDocumentos = t.documentos.map((d) => ({
+    ...d,
+    puedeValidar: puedeValidarDocumento(sesion?.rol, d.tipo),
+    entidadResponsable: d.tipo === "DeclaracionSAG" ? "SAG" : d.tipo === "AutorizacionNotarial" ? "PDI" : "Registro Civil",
+  }));
+
   return (
     <>
       <div style={S.overlay} onClick={onClose} />
@@ -1171,7 +1428,21 @@ function RevisionDrawer({ t, viajero, vehiculo, onClose, onAprobar, onRechazar, 
         )}
 
         <Section title={`Documentos (${t.documentos.length})`}>
-          {t.documentos.map((d) => <DocRow key={d.idDocumento} d={d} />)}
+          {permisosDocumentos.map((d) => (
+            <div key={d.idDocumento}>
+              <DocRow d={d} />
+              <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "2px 0 6px 0" }}>
+                <span style={{ fontSize: 10, color: "var(--muted)", fontStyle: "italic" }}>
+                  Entidad responsable: {d.entidadResponsable}
+                </span>
+                {d.puedeValidar ? (
+                  <span style={{ fontSize: 10, color: "#2f6b40", fontWeight: 700 }}>✓ Puede validar</span>
+                ) : (
+                  <span style={{ fontSize: 10, color: "#9a2f2f", fontWeight: 700 }}>✗ Sin permiso</span>
+                )}
+              </div>
+            </div>
+          ))}
         </Section>
 
         {hayProhibido && (
@@ -1316,9 +1587,166 @@ function Informes({ tramites }) {
   );
 }
 
+// ============================== PANEL AUDITORÍA ===============================
+function PanelAuditoria() {
+  const [filtroRol, setFiltroRol] = useState("todos");
+  const [filtroAccion, setFiltroAccion] = useState("todos");
+
+  const filtradas = AUDITORIA.filter((a) =>
+    (filtroRol === "todos" || a.rol === filtroRol) &&
+    (filtroAccion === "todos" || a.accion === filtroAccion)
+  );
+
+  // Roles únicos en auditoría
+  const rolesUnicos = [...new Set(AUDITORIA.map((a) => a.rol))].sort();
+  const acciones = [...new Set(AUDITORIA.map((a) => a.accion))].sort();
+
+  return (
+    <div>
+      <div style={{ ...S.filterRow, marginBottom: 16 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)" }}>Filtrar por rol:</span>
+        <button onClick={() => setFiltroRol("todos")} style={{ ...S.chip, ...(filtroRol === "todos" ? S.chipActive : {}) }}>Todos</button>
+        {rolesUnicos.map((r) => (
+          <button key={r} onClick={() => setFiltroRol(r)} style={{ ...S.chip, ...(filtroRol === r ? S.chipActive : {}) }}>
+            {r}
+          </button>
+        ))}
+      </div>
+      <div style={{ ...S.filterRow, marginBottom: 16 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)" }}>Filtrar por acción:</span>
+        <button onClick={() => setFiltroAccion("todos")} style={{ ...S.chip, ...(filtroAccion === "todos" ? S.chipActive : {}) }}>Todos</button>
+        {acciones.map((ac) => (
+          <button key={ac} onClick={() => setFiltroAccion(ac)} style={{ ...S.chip, ...(filtroAccion === ac ? S.chipActive : {}) }}>
+            {ac}
+          </button>
+        ))}
+      </div>
+
+      <div style={S.panel}>
+        <div style={S.panelHead}>
+          <h3 style={S.panelTitle}>Registro de auditoría ({filtradas.length} eventos)</h3>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>Total: {AUDITORIA.length} eventos registrados</span>
+        </div>
+
+        {filtradas.length === 0 ? (
+          <EmptyState text="No hay eventos de auditoría con esos filtros." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 16 }}>
+            {filtradas.map((a, i) => (
+              <div key={i} style={{ ...S.adminRow, gap: 12, padding: "10px 12px" }}>
+                <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "monospace", minWidth: 140 }}>
+                  {a.timestamp}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)", minWidth: 70 }}>
+                  {a.rol}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#013171", minWidth: 80 }}>
+                  {a.accion}
+                </span>
+                <span style={{ fontSize: 12, color: "var(--muted)", flex: 1 }}>
+                  {a.nombre}
+                </span>
+                {Object.keys(a.detalles).length > 0 && (
+                  <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                    {JSON.stringify(a.detalles).slice(0, 50)}…
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================== PANEL CONFIGURACIÓN ===============================
+function PanelConfiguracion() {
+  const [productosProhibidos, setProductosProhibidos] = useState(["carnes", "lacteos"]);
+  const [nuevoProducto, setNuevoProducto] = useState("");
+
+  function agregarProducto() {
+    if (!nuevoProducto.trim()) return;
+    if (!productosProhibidos.includes(nuevoProducto.trim().toLowerCase())) {
+      setProductosProhibidos([...productosProhibidos, nuevoProducto.trim().toLowerCase()]);
+      setNuevoProducto("");
+    }
+  }
+
+  function removerProducto(p) {
+    setProductosProhibidos(productosProhibidos.filter((x) => x !== p));
+  }
+
+  return (
+    <div>
+      <div style={S.panel}>
+        <div style={S.panelHead}>
+          <h3 style={S.panelTitle}>Configuración del Sistema</h3>
+          <span style={S.formSub}>Parámetros controlables por administrador</span>
+        </div>
+
+        <Section title="Productos prohibidos (SAG)">
+          <p style={{ ...S.muted, marginBottom: 12 }}>
+            Estos productos son rechazados automáticamente en la declaración SAG.
+          </p>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end" }}>
+            <Field label="Agregar producto">
+              <input
+                style={S.input}
+                value={nuevoProducto}
+                onChange={(e) => setNuevoProducto(e.target.value)}
+                placeholder="ej: quesos, carnes"
+              />
+            </Field>
+            <button style={S.btnPrimary} onClick={agregarProducto}>
+              <Plus size={16} /> Agregar
+            </button>
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {productosProhibidos.map((p) => (
+              <div key={p} style={{ ...S.tag, background: "#f8dada", borderColor: "#e09a9a", color: "#9a2f2f" }}>
+                {p}
+                <button
+                  onClick={() => removerProducto(p)}
+                  style={{ marginLeft: 6, border: "none", background: "none", color: "#9a2f2f", cursor: "pointer", fontSize: 14 }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Section title="Plazo máximo de vehículos">
+          <p style={{ ...S.muted }}>
+            Según el Acuerdo Chileno-Argentino, los vehículos pueden salir temporalmente por máximo <b>180 días</b>.
+            Este parámetro es validado en el wizard de creación de trámites.
+          </p>
+        </Section>
+
+        <Section title="Vigencia de documentos">
+          <KV k="Declaración SAG" v="30 días" />
+          <KV k="Autorización notarial" v="1 año" />
+          <KV k="Formulario vehículo" v="Plazo configurable (máx 180 días)" />
+        </Section>
+
+        <Section title="Integración de sistemas externos">
+          <p style={{ ...S.muted, marginBottom: 6 }}>
+            Los siguientes sistemas simulados están integrados (actualmente con funciones mock):
+          </p>
+          <KV k="SAG (Servicio Agrícola)" v="✓ Conectado (simulado)" />
+          <KV k="PDI (Policía)" v="✓ Conectado (simulado)" />
+          <KV k="Registro Civil" v="✓ Conectado (simulado)" />
+        </Section>
+      </div>
+    </div>
+  );
+}
+
 // ============================== ADMIN ===============================
-function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) {
-  const [view, setView] = useState("viajeros"); // viajeros | vehiculos
+function AdminApp({ sesion, viajeros, setViajeros, vehiculos, setVehiculos, tramites }) {
+  const [view, setView] = useState("viajeros"); // viajeros | vehiculos | auditoria | configuracion
   const [editing, setEditing] = useState(null); // objeto en edición o null
   const [creating, setCreating] = useState(false);
 
@@ -1339,6 +1767,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
     }
     setViajeros((p) => p.filter((v) => v.rut !== rut));
     borrarViajero(rut).catch(e => console.error("Error eliminando viajero:", e));
+    registrarAuditoria(sesion, "ELIMINAR_VIAJERO", { rut });
   }
   function eliminarVehiculo(pat) {
     if (vehiculoEnUso(pat)) {
@@ -1346,6 +1775,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
     }
     setVehiculos((p) => p.filter((v) => v.patente !== pat));
     borrarVehiculo(pat).catch(e => console.error("Error eliminando vehículo:", e));
+    registrarAuditoria(sesion, "ELIMINAR_VEHICULO", { patente: pat });
   }
 
   function guardarViajero(data, original) {
@@ -1357,6 +1787,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
       borrarViajero(original.rut).catch(e => console.error(e));
     }
     persistirViajero(data).catch(e => console.error("Error guardando viajero:", e));
+    registrarAuditoria(sesion, original ? "EDITAR_VIAJERO" : "CREAR_VIAJERO", { rut: data.rut, nombre: data.nombreCompleto });
     setEditing(null); setCreating(false);
   }
   function guardarVehiculo(data, original) {
@@ -1367,11 +1798,12 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
       borrarVehiculo(original.patente).catch(e => console.error(e));
     }
     persistirVehiculo(data).catch(e => console.error("Error guardando vehículo:", e));
+    registrarAuditoria(sesion, original ? "EDITAR_VEHICULO" : "CREAR_VEHICULO", { patente: data.patente, marca: data.marca });
     setEditing(null); setCreating(false);
   }
 
-  const esViajeros = view === "viajeros";
-
+  
+  // Las dos nuevas vistas:
   return (
     <main style={S.main}>
       <SectionTabs
@@ -1379,26 +1811,15 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
         tabs={[
           { id: "viajeros", label: "Viajeros", icon: Users },
           { id: "vehiculos", label: "Vehículos", icon: Car },
+          { id: "auditoria", label: "Auditoría", icon: FileText },
+          { id: "configuracion", label: "Configuración", icon: Settings },
         ]}
         active={view}
         onChange={(v) => { setView(v); setEditing(null); setCreating(false); }}
       />
 
-      <div style={S.adminBar}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-          <Database size={17} style={{ color: "var(--accent)" }} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>
-            {esViajeros ? `${viajeros.length} viajeros` : `${vehiculos.length} vehículos`} registrados
-          </span>
-        </div>
-        <button style={S.btnPrimary} onClick={() => { setCreating(true); setEditing(null); }}>
-          {esViajeros ? <UserPlus size={16} /> : <Plus size={16} />}
-          {esViajeros ? "Nuevo viajero" : "Nuevo vehículo"}
-        </button>
-      </div>
-
       {/* Formulario de creación/edición */}
-      {(creating || editing) && esViajeros && (
+      {(creating || editing) && view === "viajeros" && (
         <ViajeroForm
           original={editing}
           existentes={viajeros}
@@ -1406,7 +1827,7 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
           onCancel={() => { setEditing(null); setCreating(false); }}
         />
       )}
-      {(creating || editing) && !esViajeros && (
+      {(creating || editing) && view === "vehiculos" && (
         <VehiculoForm
           original={editing}
           existentes={vehiculos}
@@ -1415,54 +1836,86 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
         />
       )}
 
-      {/* Tabla / listado */}
-      {esViajeros ? (
-        <div style={S.tableWrap}>
-          {viajeros.length === 0 && <EmptyState text="No hay viajeros registrados." />}
-          {viajeros.map((v) => (
-            <div key={v.rut} style={S.adminRow}>
-              <div style={S.adminAvatar}>{iniciales(v.nombreCompleto)}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 14.5 }}>
-                  {v.nombreCompleto}
-                  {v.esMenor && <span style={S.menorBadge}>Menor</span>}
-                </div>
-                <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-                  {v.rut} · {v.nacionalidad} · {v.email}
-                </div>
-              </div>
-              {viajeroEnUso(v.rut) && <Tag icon={FileCheck}>En uso</Tag>}
-              <button style={S.iconBtnSm} title="Editar"
-                onClick={() => { setEditing(v); setCreating(false); }}><Pencil size={15} /></button>
-              <button style={{ ...S.iconBtnSm, color: "#9a2f2f" }} title="Eliminar"
-                onClick={() => eliminarViajero(v.rut)}><Trash2 size={15} /></button>
+      {/* Vista dinámica según el tab seleccionado */}
+      {view === "viajeros" && (
+        <>
+          <div style={S.adminBar}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <Database size={17} style={{ color: "var(--accent)" }} />
+              <span style={{ fontWeight: 700, fontSize: 15 }}>{viajeros.length} viajeros registrados</span>
             </div>
-          ))}
-        </div>
-      ) : (
-        <div style={S.tableWrap}>
-          {vehiculos.length === 0 && <EmptyState text="No hay vehículos registrados." />}
-          {vehiculos.map((v) => (
-            <div key={v.patente} style={S.adminRow}>
-              <div style={{ ...S.adminAvatar, background: "#b07d2a22", color: "#8a5e16" }}><Car size={18} /></div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 14.5 }}>
-                  {v.patente}
-                  {v.esDiplomatico && <span style={{ ...S.menorBadge, background: "#7a4fa022", color: "#5e3a82" }}>Diplomático</span>}
-                  {v.tieneRestricciones && <span style={{ ...S.menorBadge, background: "#9a2f2f22", color: "#9a2f2f" }}>Restringido</span>}
+            <button style={S.btnPrimary} onClick={() => { setCreating(true); setEditing(null); }}>
+              <UserPlus size={16} /> Nuevo viajero
+            </button>
+          </div>
+          <div style={S.tableWrap}>
+            {viajeros.length === 0 && <EmptyState text="No hay viajeros registrados." />}
+            {viajeros.map((v) => (
+              <div key={v.rut} style={S.adminRow}>
+                <div style={S.adminAvatar}>{iniciales(v.nombreCompleto)}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                    {v.nombreCompleto}
+                    {v.esMenor && <span style={S.menorBadge}>Menor</span>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                    {v.rut} · {v.nacionalidad} · {v.email}
+                  </div>
                 </div>
-                <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-                  {v.marca} {v.modelo} ({v.anio}) · {v.color} · Chasis {v.numeroChasis}
-                </div>
+                {viajeroEnUso(v.rut) && <Tag icon={FileCheck}>En uso</Tag>}
+                <button style={S.iconBtnSm} title="Editar"
+                  onClick={() => { setEditing(v); setCreating(false); }}><Pencil size={15} /></button>
+                <button style={{ ...S.iconBtnSm, color: "#9a2f2f" }} title="Eliminar"
+                  onClick={() => eliminarViajero(v.rut)}><Trash2 size={15} /></button>
               </div>
-              {vehiculoEnUso(v.patente) && <Tag icon={FileCheck}>En uso</Tag>}
-              <button style={S.iconBtnSm} title="Editar"
-                onClick={() => { setEditing(v); setCreating(false); }}><Pencil size={15} /></button>
-              <button style={{ ...S.iconBtnSm, color: "#9a2f2f" }} title="Eliminar"
-                onClick={() => eliminarVehiculo(v.patente)}><Trash2 size={15} /></button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {view === "vehiculos" && (
+        <>
+          <div style={S.adminBar}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <Database size={17} style={{ color: "var(--accent)" }} />
+              <span style={{ fontWeight: 700, fontSize: 15 }}>{vehiculos.length} vehículos registrados</span>
             </div>
-          ))}
-        </div>
+            <button style={S.btnPrimary} onClick={() => { setCreating(true); setEditing(null); }}>
+              <Plus size={16} /> Nuevo vehículo
+            </button>
+          </div>
+          <div style={S.tableWrap}>
+            {vehiculos.length === 0 && <EmptyState text="No hay vehículos registrados." />}
+            {vehiculos.map((v) => (
+              <div key={v.patente} style={S.adminRow}>
+                <div style={{ ...S.adminAvatar, background: "#b07d2a22", color: "#8a5e16" }}><Car size={18} /></div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                    {v.patente}
+                    {v.esDiplomatico && <span style={{ ...S.menorBadge, background: "#7a4fa022", color: "#5e3a82" }}>Diplomático</span>}
+                    {v.tieneRestricciones && <span style={{ ...S.menorBadge, background: "#9a2f2f22", color: "#9a2f2f" }}>Restringido</span>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                    {v.marca} {v.modelo} ({v.anio}) · {v.color} · Chasis {v.numeroChasis}
+                  </div>
+                </div>
+                {vehiculoEnUso(v.patente) && <Tag icon={FileCheck}>En uso</Tag>}
+                <button style={S.iconBtnSm} title="Editar"
+                  onClick={() => { setEditing(v); setCreating(false); }}><Pencil size={15} /></button>
+                <button style={{ ...S.iconBtnSm, color: "#9a2f2f" }} title="Eliminar"
+                  onClick={() => eliminarVehiculo(v.patente)}><Trash2 size={15} /></button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {view === "auditoria" && (
+        <PanelAuditoria />
+      )}
+
+      {view === "configuracion" && (
+        <PanelConfiguracion />
       )}
     </main>
   );
