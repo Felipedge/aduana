@@ -1,4 +1,11 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import {
+  cargarTodo, sembrarDatos,
+  guardarViajero as persistirViajero,
+  guardarVehiculo as persistirVehiculo,
+  guardarTramite, guardarUsuario,
+  borrarViajero, borrarVehiculo,
+} from "./db";
 import {
   Car, FileCheck, Leaf, FileText, BarChart3,
   Users, Search, CheckCircle2, XCircle, Clock, AlertTriangle,
@@ -78,6 +85,37 @@ const ESTADO_META = {
 
 const PRODUCTOS_PROHIBIDOS = ["carnes", "lacteos"];
 
+// DEF-W003: normaliza texto (minúsculas, sin tildes) para que "CARNES",
+// "Carnes" o "Lácteos" se detecten igual que "carnes" / "lacteos".
+function normalizar(texto) {
+  return (texto || "")
+    .toString()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function esProductoProhibido(producto) {
+  return PRODUCTOS_PROHIBIDOS.some((p) => normalizar(p) === normalizar(producto));
+}
+
+// ---- Simulación del Registro Civil (UC-01, CP-WEB-VEH-002 / VEH-003) ----
+// En producción esto sería una llamada a la API del Registro Civil. Aquí
+// devolvemos datos de prueba: patentes conocidas, una con restricción legal
+// y cualquier otra como "no encontrada" (permite ingreso manual).
+const REGISTRO_CIVIL_VEHICULOS = {
+  "KXLR-45": { marca: "Toyota", modelo: "RAV4", anio: 2021, color: "Gris", numeroChasis: "JTMB1234567890", tieneRestricciones: false },
+  "CD-0012": { marca: "Mercedes-Benz", modelo: "E-Class", anio: 2023, color: "Negro", numeroChasis: "WDD2130001A123", tieneRestricciones: false },
+  "KXLR-99": { marca: "Nissan", modelo: "Versa", anio: 2019, color: "Blanco", numeroChasis: "3N1CN7AP0KL", tieneRestricciones: true, causal: "Multas de tránsito impagas / encargo por robo" },
+};
+
+function consultarRegistroCivil(patente) {
+  const datos = REGISTRO_CIVIL_VEHICULOS[(patente || "").toUpperCase().trim()];
+  if (!datos) return { encontrado: false };
+  return { encontrado: true, ...datos };
+}
+
 // Generador de ID único para nuevos viajeros (simula RUT)
 function generarRUTemporal() {
   return `EXT-${Math.floor(Math.random() * 1000000)}`;
@@ -96,17 +134,67 @@ function isValidRUTChileno(rut) {
 // ============================== APP ===============================
 export default function SistemaAduanas() {
   const [sesion, setSesion] = useState(null); // null | objeto usuario logueado
-  const [viajeros, setViajeros] = useState(SEED_VIAJEROS);
-  const [vehiculos, setVehiculos] = useState(SEED_VEHICULOS);
-  const [tramites, setTramites] = useState(SEED_TRAMITES);
-  const [usuarios, setUsuarios] = useState(USUARIOS);
+  const [viajeros, setViajeros] = useState([]);
+  const [vehiculos, setVehiculos] = useState([]);
+  const [tramites, setTramites] = useState([]);
+  const [usuarios, setUsuarios] = useState([]);
   const [mostrarRegistro, setMostrarRegistro] = useState(false);
+  const [cargandoBD, setCargandoBD] = useState(true);
+
+  // Carga inicial desde Firestore. Si la base está vacía, sube los datos
+  // semilla una sola vez y luego los usa como estado inicial.
+  useEffect(() => {
+    (async () => {
+      try {
+        let datos = await cargarTodo();
+        const vacia =
+          datos.viajeros.length === 0 &&
+          datos.vehiculos.length === 0 &&
+          datos.tramites.length === 0 &&
+          datos.usuarios.length === 0;
+        if (vacia) {
+          const semilla = {
+            viajeros: SEED_VIAJEROS,
+            vehiculos: SEED_VEHICULOS,
+            tramites: SEED_TRAMITES,
+            usuarios: USUARIOS,
+          };
+          await sembrarDatos(semilla);
+          datos = semilla;
+        }
+        setViajeros(datos.viajeros);
+        setVehiculos(datos.vehiculos);
+        setTramites(datos.tramites);
+        setUsuarios(datos.usuarios);
+      } catch (e) {
+        console.error("Error cargando Firestore:", e);
+        alert("No se pudo conectar a la base de datos. Revisa firebase.js y las reglas de Firestore.");
+      } finally {
+        setCargandoBD(false);
+      }
+    })();
+  }, []);
+
+  if (cargandoBD) {
+    return (
+      <div style={S.root}>
+        <StyleTag />
+        <div style={{ ...S.loginWrap }}>
+          <div style={{ textAlign: "center", color: "var(--muted)" }}>
+            <Database size={40} style={{ marginBottom: 12, opacity: 0.6 }} />
+            <p>Conectando con la base de datos…</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={S.root}>
       <StyleTag />
       <Header sesion={sesion} onExit={() => setSesion(null)} />
       {!sesion && !mostrarRegistro && (<Login 
+          usuarios={usuarios}
           onLogin={setSesion}
           onRegistro={() => setMostrarRegistro(true)} />)}
       {!sesion && mostrarRegistro && (
@@ -149,13 +237,13 @@ export default function SistemaAduanas() {
 }
 
 // ============================== LOGIN ===============================
-function Login({ onLogin, onRegistro }) {
+function Login({ usuarios, onLogin, onRegistro }) {
   const [rut, setRut] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
   function entrar() {
-    const u = USUARIOS.find(
+    const u = usuarios.find(
       (x) => x.rut.toLowerCase() === rut.trim().toLowerCase() && x.password === password
     );
     if (!u) {
@@ -341,6 +429,12 @@ function RegistroViajero({ onRegistroExitoso, onCancelar, viajerosExistentes, se
       // Actualizar estados globales
       setViajeros(prev => [nuevoViajero, ...prev]);
       setUsuarios(prev => [...prev, nuevoUsuario]);
+
+      // Persistir en Firestore
+      Promise.all([
+        persistirViajero(nuevoViajero),
+        guardarUsuario(nuevoUsuario),
+      ]).catch(e => console.error("Error guardando registro:", e));
 
       setCargando(false);
       onRegistroExitoso(nuevoUsuario);
@@ -646,7 +740,7 @@ function ViajeroApp({ sesion, viajeros, vehiculos, tramites, setTramites }) {
       {view === "nuevo" && (
         <NuevoTramite
           actor={actor} vehiculos={vehiculos}
-          onCreate={(t) => { setTramites((p) => [t, ...p]); setView("inicio"); }}
+          onCreate={(t) => { guardarTramite(t).catch(e => console.error("Error guardando trámite:", e)); setTramites((p) => [t, ...p]); setView("inicio"); }}
           onCancel={() => setView("inicio")}
         />
       )}
@@ -660,6 +754,23 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const [tipoViaje, setTipoViaje] = useState("salida");
   const [llevaVehiculo, setLlevaVehiculo] = useState(false);
   const [patente, setPatente] = useState(vehiculos[0]?.patente || "");
+
+  // CP-WEB-VEH-002/003, DEF-W009: validación de patente contra Registro Civil
+  const [patenteConsulta, setPatenteConsulta] = useState("");
+  const [resultadoRC, setResultadoRC] = useState(null); // null | objeto resultado
+  const [ingresoManual, setIngresoManual] = useState(false);
+  const [vehManual, setVehManual] = useState({ marca: "", modelo: "", anio: "", numeroChasis: "" });
+
+  function validarPatente() {
+    const r = consultarRegistroCivil(patenteConsulta);
+    setResultadoRC(r);
+    setIngresoManual(false);
+    if (r.encontrado && !r.tieneRestricciones) {
+      setPatente(patenteConsulta.toUpperCase().trim());
+    } else {
+      setPatente("");
+    }
+  }
 
   // DeclaracionSAG
   const [tieneAlimentos, setTieneAlimentos] = useState(false);
@@ -676,8 +787,21 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const [numeroNotaria, setNumeroNotaria] = useState("");
   const [fechaNotaria, setFechaNotaria] = useState("");
 
-  const productoProhibido = tieneAlimentos && PRODUCTOS_PROHIBIDOS.includes(tipoProducto);
+  const productoProhibido = tieneAlimentos && esProductoProhibido(tipoProducto);
   const totalPasos = 4;
+
+  // CP-WEB-SAG-003: campos obligatorios en la declaración SAG
+  const sagIncompleto =
+    (tieneAlimentos && (!paisOrigen.trim() || !cantidad.trim())) ||
+    (tieneMascota && !chip.trim());
+
+  // Bloqueo de avance en paso 1 según validación de patente (CP-WEB-VEH-002/003)
+  const vehiculoBloquea =
+    llevaVehiculo && (
+      !resultadoRC ||                                   // aún no valida
+      (resultadoRC.encontrado && resultadoRC.tieneRestricciones) || // restricción legal
+      (!resultadoRC.encontrado && !ingresoManual)       // no encontrada y sin ingreso manual
+    );
 
   function finalizar() {
     const documentos = [];
@@ -689,11 +813,18 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
       tipoMascota: tieneMascota ? tipoMascota : null, chipIdentificacion: tieneMascota ? chip : null,
     });
     if (llevaVehiculo && patente) {
+      const esManual = ingresoManual && resultadoRC && !resultadoRC.encontrado;
       documentos.push({
         tipo: "FormularioVehiculoAcuerdo", idDocumento: Math.floor(Math.random() * 9000) + 1000,
         estado: "pendiente", fechaEmision: today(), fechaVencimiento: addDays(today(), 90),
         plazoDias: 90, paisDestino: "Argentina", fechaSalida: today(), fechaRetorno: addDays(today(), 80),
         lugarSalida: "Paso Los Libertadores",
+        // CP-WEB-VEH-003: si fue ingreso manual, queda con validación pendiente
+        validacionPendiente: !!esManual,
+        marca: esManual ? vehManual.marca : undefined,
+        modelo: esManual ? vehManual.modelo : undefined,
+        anioVehiculo: esManual ? vehManual.anio : undefined,
+        numeroChasis: esManual ? vehManual.numeroChasis : undefined,
       });
     }
     if (actor.requiereAutorizacion) {
@@ -726,15 +857,48 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
             options={[{ v: "salida", l: "Salida del país" }, { v: "entrada", l: "Entrada al país" }]} />
           <Toggle label="Viajo con vehículo" checked={llevaVehiculo} onChange={setLlevaVehiculo} />
           {llevaVehiculo && (
-            <Field label="Vehículo registrado">
-              <select style={S.select} value={patente} onChange={(e) => setPatente(e.target.value)}>
-                {vehiculos.map((v) => (
-                  <option key={v.patente} value={v.patente}>
-                    {v.patente} — {v.marca} {v.modelo} {v.esDiplomatico ? "· Diplomático" : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            <>
+              <Field label="Patente del vehículo">
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input style={{ ...S.input, flex: 1 }} placeholder="ej: KXLR-45"
+                    value={patenteConsulta} onChange={(e) => { setPatenteConsulta(e.target.value); setResultadoRC(null); }} />
+                  <button style={S.btnGhost} onClick={validarPatente}>Validar</button>
+                </div>
+              </Field>
+
+              {/* CP-WEB-VEH-002 + DEF-W009: vehículo con restricciones → BLOQUEA */}
+              {resultadoRC?.encontrado && resultadoRC.tieneRestricciones && (
+                <Banner tone="danger" icon={XCircle} title="Vehículo con impedimento legal"
+                  text={`${resultadoRC.causal}. No es posible continuar con este vehículo.`} />
+              )}
+
+              {/* Flujo principal: patente válida sin restricciones */}
+              {resultadoRC?.encontrado && !resultadoRC.tieneRestricciones && (
+                <Banner tone="ok" icon={CheckCircle2} title="Vehículo validado"
+                  text={`${resultadoRC.marca} ${resultadoRC.modelo} · ${resultadoRC.color} · ${resultadoRC.anio}. Validado con Registro Civil.`} />
+              )}
+
+              {/* CP-WEB-VEH-003: patente no encontrada → permitir ingreso manual */}
+              {resultadoRC && !resultadoRC.encontrado && (
+                <>
+                  <Banner tone="warn" icon={AlertTriangle} title="Patente no encontrada"
+                    text="No existe en Registro Civil. Puedes ingresar los datos manualmente; el trámite quedará con validación pendiente para revisión de un funcionario." />
+                  {!ingresoManual && (
+                    <button style={S.btnGhost} onClick={() => { setIngresoManual(true); setPatente(patenteConsulta.toUpperCase().trim()); }}>
+                      Ingresar datos manualmente
+                    </button>
+                  )}
+                  {ingresoManual && (
+                    <>
+                      <Field label="Marca"><input style={S.input} value={vehManual.marca} onChange={(e) => setVehManual({ ...vehManual, marca: e.target.value })} /></Field>
+                      <Field label="Modelo"><input style={S.input} value={vehManual.modelo} onChange={(e) => setVehManual({ ...vehManual, modelo: e.target.value })} /></Field>
+                      <Field label="Año"><input style={S.input} value={vehManual.anio} onChange={(e) => setVehManual({ ...vehManual, anio: e.target.value })} /></Field>
+                      <Field label="N° de chasis"><input style={S.input} value={vehManual.numeroChasis} onChange={(e) => setVehManual({ ...vehManual, numeroChasis: e.target.value })} /></Field>
+                    </>
+                  )}
+                </>
+              )}
+            </>
           )}
         </FormBlock>
       )}
@@ -770,6 +934,10 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
               </Field>
               <Field label="Chip de identificación"><input style={S.input} placeholder="N° de microchip" value={chip} onChange={(e) => setChip(e.target.value)} /></Field>
             </>
+          )}
+          {sagIncompleto && (
+            <Banner tone="warn" icon={AlertTriangle} title="Campos obligatorios incompletos"
+              text="Completa el país de origen y la cantidad del producto, y el chip de la mascota, antes de continuar." />
           )}
         </FormBlock>
       )}
@@ -815,7 +983,12 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
           {paso === 1 ? "Cancelar" : "Atrás"}
         </button>
         {paso < totalPasos
-          ? <button style={S.btnPrimary} onClick={() => setPaso(paso + 1)}>Continuar <ArrowRight size={16} /></button>
+          ? <button
+              style={{ ...S.btnPrimary, ...((paso === 1 && vehiculoBloquea) || (paso === 2 && sagIncompleto) ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
+              disabled={(paso === 1 && vehiculoBloquea) || (paso === 2 && sagIncompleto)}
+              onClick={() => setPaso(paso + 1)}>
+              Continuar <ArrowRight size={16} />
+            </button>
           : <button style={S.btnPrimary} onClick={finalizar}><CheckCircle2 size={16} /> Iniciar trámite</button>}
       </div>
     </div>
@@ -834,12 +1007,17 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
   );
 
   function cambiarEstado(idTramite, estado, obs) {
-    setTramites((prev) => prev.map((t) =>
-      t.idTramite === idTramite
-        ? { ...t, estado, observaciones: obs ?? t.observaciones,
-            documentos: t.documentos.map((d) => ({ ...d, estado: estado === "aprobado" ? "validado" : estado === "rechazado" ? "rechazado" : d.estado })) }
-        : t
-    ));
+    setTramites((prev) => {
+      const actualizados = prev.map((t) =>
+        t.idTramite === idTramite
+          ? { ...t, estado, observaciones: obs ?? t.observaciones,
+              documentos: t.documentos.map((d) => ({ ...d, estado: estado === "aprobado" ? "validado" : estado === "rechazado" ? "rechazado" : d.estado })) }
+          : t
+      );
+      const modificado = actualizados.find((t) => t.idTramite === idTramite);
+      if (modificado) guardarTramite(modificado).catch(e => console.error("Error actualizando trámite:", e));
+      return actualizados;
+    });
     setSel(null);
   }
 
@@ -898,7 +1076,7 @@ function FuncionarioApp({ viajeros, vehiculos, tramites, setTramites }) {
 function RevisionDrawer({ t, viajero, vehiculo, onClose, onAprobar, onRechazar, onRevisar }) {
   const [obs, setObs] = useState(t.observaciones || "");
   const hayProhibido = t.documentos.some(
-    (d) => d.tipo === "DeclaracionSAG" && d.tieneAlimentos && PRODUCTOS_PROHIBIDOS.includes(d.tipoProducto)
+    (d) => d.tipo === "DeclaracionSAG" && d.tieneAlimentos && esProductoProhibido(d.tipoProducto)
   );
   return (
     <>
@@ -958,45 +1136,119 @@ function RevisionDrawer({ t, viajero, vehiculo, onClose, onAprobar, onRechazar, 
 
 // ---- Informes estadísticos (InformeEstadistico) ----
 function Informes({ tramites }) {
+  const [desde, setDesde] = useState("2026-05-01");
+  const [hasta, setHasta] = useState("2026-05-31");
+  const [tipo, setTipo] = useState("personas"); // personas | vehiculos
+
+  // DEF-W008: comparar solo la parte de fecha (YYYY-MM-DD) evita el desfase
+  // de zona horaria. No se construyen objetos Date en UTC para el filtro.
+  const enRango = (fechaHora) => {
+    const f = String(fechaHora).slice(0, 10);
+    return (!desde || f >= desde) && (!hasta || f <= hasta);
+  };
+
+  const filtrados = useMemo(
+    () => tramites.filter((t) => enRango(t.fechaHora)),
+    [tramites, desde, hasta]
+  );
+
   const stats = useMemo(() => {
     const por = { pendiente: 0, en_revision: 0, aprobado: 0, rechazado: 0 };
-    tramites.forEach((t) => { por[t.estado] = (por[t.estado] || 0) + 1; });
-    const conVehiculo = tramites.filter((t) => t.vehiculoPatente).length;
-    const conSAG = tramites.filter((t) => t.documentos.some((d) => d.tipo === "DeclaracionSAG" && d.tieneAlimentos)).length;
-    return { por, total: tramites.length, conVehiculo, conSAG };
-  }, [tramites]);
+    filtrados.forEach((t) => { por[t.estado] = (por[t.estado] || 0) + 1; });
+    const conVehiculo = filtrados.filter((t) => t.vehiculoPatente).length;
+    const conSAG = filtrados.filter((t) => t.documentos.some((d) => d.tipo === "DeclaracionSAG" && d.tieneAlimentos)).length;
+    return { por, total: filtrados.length, conVehiculo, conSAG };
+  }, [filtrados]);
 
   const max = Math.max(1, ...Object.values(stats.por));
+  const sinDatos = filtrados.length === 0; // CP-WEB-INF-002
+
+  // DEF-W010: exportación con identidad institucional (logo textual SNA,
+  // fecha de generación, período y total) y fechas en formato chileno.
+  function exportarHTML() {
+    const filas = filtrados.map((t) =>
+      `<tr><td>${t.idTramite}</td><td>${fmtFechaCL(t.fechaHora)}</td><td>${t.tipoViaje}</td><td>${ESTADO_META[t.estado]?.label || t.estado}</td><td>${t.vehiculoPatente || "—"}</td></tr>`
+    ).join("");
+    const html = `<!doctype html><html lang="es"><head><meta charset="utf-8">
+      <title>Informe SNA</title></head><body style="font-family:Arial,sans-serif;padding:30px">
+      <div style="border-bottom:3px solid #013171;padding-bottom:12px;margin-bottom:18px">
+        <h1 style="color:#013171;margin:0">🛂 Servicio Nacional de Aduanas</h1>
+        <p style="margin:4px 0;color:#555">Informe estadístico — Trámites de ${tipo}</p>
+      </div>
+      <p><b>Período:</b> ${fmtFechaCL(desde)} al ${fmtFechaCL(hasta)}<br>
+         <b>Fecha de generación:</b> ${fmtFechaCL(nowStr())}<br>
+         <b>Total de registros:</b> ${filtrados.length}</p>
+      <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
+        <thead style="background:#013171;color:#fff">
+          <tr><th>ID</th><th>Fecha</th><th>Tipo viaje</th><th>Estado</th><th>Vehículo</th></tr>
+        </thead><tbody>${filas}</tbody></table>
+      <p style="margin-top:24px;color:#888;font-size:12px">Documento generado por el Sistema de Gestión de Pasos Fronterizos — SNA</p>
+      </body></html>`;
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    descargar(blob, `informe_SNA_${desde}_${hasta}.html`);
+  }
+
+  function exportarCSV() {
+    // DEF-W005: fechas en formato chileno DD/MM/AAAA, no ISO.
+    const cab = "ID;Fecha;Tipo de viaje;Estado;Vehiculo\n";
+    const filas = filtrados.map((t) =>
+      `${t.idTramite};${fmtFechaCL(t.fechaHora)};${t.tipoViaje};${ESTADO_META[t.estado]?.label || t.estado};${t.vehiculoPatente || "—"}`
+    ).join("\n");
+    const blob = new Blob(["\uFEFF" + cab + filas], { type: "text/csv;charset=utf-8" });
+    descargar(blob, `informe_SNA_${desde}_${hasta}.csv`);
+  }
 
   return (
     <div>
-      <div style={S.statRow}>
-        <StatCard label="Trámites totales" value={stats.total} icon={FileText} />
-        <StatCard label="Con vehículo" value={stats.conVehiculo} icon={Car} />
-        <StatCard label="Declaran alimentos" value={stats.conSAG} icon={Apple} />
-        <StatCard label="Aprobados" value={stats.por.aprobado} icon={CheckCircle2} />
+      {/* Selección de período y tipo (CP-WEB-INF-001) */}
+      <div style={{ ...S.panel, marginBottom: 18 }}>
+        <div style={S.formGrid}>
+          <Field label="Tipo de informe">
+            <select style={S.select} value={tipo} onChange={(e) => setTipo(e.target.value)}>
+              <option value="personas">Personas</option>
+              <option value="vehiculos">Vehículos</option>
+            </select>
+          </Field>
+          <Field label="Desde"><input type="date" style={S.input} value={desde} onChange={(e) => setDesde(e.target.value)} /></Field>
+          <Field label="Hasta"><input type="date" style={S.input} value={hasta} onChange={(e) => setHasta(e.target.value)} /></Field>
+        </div>
       </div>
 
-      <div style={S.panel}>
-        <div style={S.panelHead}>
-          <h3 style={S.panelTitle}>Distribución por estado</h3>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button style={S.btnGhostSm}><Download size={14} /> PDF</button>
-            <button style={S.btnGhostSm}><Download size={14} /> Excel</button>
+      {/* CP-WEB-INF-002: período sin datos */}
+      {sinDatos ? (
+        <Banner tone="warn" icon={AlertTriangle} title="Sin datos en el período"
+          text="No hay trámites registrados en el período seleccionado. Elige otro período o cancela." />
+      ) : (
+        <>
+          <div style={S.statRow}>
+            <StatCard label="Trámites en período" value={stats.total} icon={FileText} />
+            <StatCard label="Con vehículo" value={stats.conVehiculo} icon={Car} />
+            <StatCard label="Declaran alimentos" value={stats.conSAG} icon={Apple} />
+            <StatCard label="Aprobados" value={stats.por.aprobado} icon={CheckCircle2} />
           </div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 16 }}>
-          {Object.entries(stats.por).map(([k, v]) => (
-            <div key={k} style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <span style={{ width: 110, fontSize: 13, color: "var(--ink)" }}>{ESTADO_META[k].label}</span>
-              <div style={{ flex: 1, background: "#e3e8f0", borderRadius: 6, height: 22, overflow: "hidden" }}>
-                <div style={{ width: `${(v / max) * 100}%`, height: "100%", background: ESTADO_META[k].color, borderRadius: 6, transition: "width .5s" }} />
+
+          <div style={S.panel}>
+            <div style={S.panelHead}>
+              <h3 style={S.panelTitle}>Distribución por estado</h3>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={S.btnGhostSm} onClick={exportarHTML}><Download size={14} /> PDF/HTML</button>
+                <button style={S.btnGhostSm} onClick={exportarCSV}><Download size={14} /> Excel/CSV</button>
               </div>
-              <span style={{ width: 28, textAlign: "right", fontWeight: 700, fontSize: 14 }}>{v}</span>
             </div>
-          ))}
-        </div>
-      </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 16 }}>
+              {Object.entries(stats.por).map(([k, v]) => (
+                <div key={k} style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <span style={{ width: 110, fontSize: 13, color: "var(--ink)" }}>{ESTADO_META[k].label}</span>
+                  <div style={{ flex: 1, background: "#e3e8f0", borderRadius: 6, height: 22, overflow: "hidden" }}>
+                    <div style={{ width: `${(v / max) * 100}%`, height: "100%", background: ESTADO_META[k].color, borderRadius: 6, transition: "width .5s" }} />
+                  </div>
+                  <span style={{ width: 28, textAlign: "right", fontWeight: 700, fontSize: 14 }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1008,32 +1260,50 @@ function AdminApp({ viajeros, setViajeros, vehiculos, setVehiculos, tramites }) 
   const [creating, setCreating] = useState(false);
 
   // ¿Está el registro en uso por algún trámite? (para advertir al eliminar)
-  function viajeroEnUso(rut) { return tramites.some((t) => t.viajeroRut === rut); }
+  function tramitesDeViajero(rut) { return tramites.filter((t) => t.viajeroRut === rut); }
+  function viajeroEnUso(rut) { return tramitesDeViajero(rut).length > 0; }
   function vehiculoEnUso(pat) { return tramites.some((t) => t.vehiculoPatente === pat); }
 
   function eliminarViajero(rut) {
-    if (viajeroEnUso(rut)) {
-      if (!window.confirm("Este viajero tiene trámites asociados. ¿Eliminar de todos modos?")) return;
+    const asociados = tramitesDeViajero(rut);
+    // DEF-W006: advertir cuántos trámites activos quedarían huérfanos
+    if (asociados.length > 0) {
+      const activos = asociados.filter((t) => t.estado === "pendiente" || t.estado === "en_revision").length;
+      const msg = activos > 0
+        ? `Este viajero tiene ${asociados.length} trámite(s), ${activos} de ellos activo(s) (pendientes o en revisión). Si lo eliminas, esos trámites quedarán huérfanos. ¿Continuar?`
+        : `Este viajero tiene ${asociados.length} trámite(s) asociado(s). ¿Eliminar de todos modos?`;
+      if (!window.confirm(msg)) return;
     }
     setViajeros((p) => p.filter((v) => v.rut !== rut));
+    borrarViajero(rut).catch(e => console.error("Error eliminando viajero:", e));
   }
   function eliminarVehiculo(pat) {
     if (vehiculoEnUso(pat)) {
       if (!window.confirm("Este vehículo tiene trámites asociados. ¿Eliminar de todos modos?")) return;
     }
     setVehiculos((p) => p.filter((v) => v.patente !== pat));
+    borrarVehiculo(pat).catch(e => console.error("Error eliminando vehículo:", e));
   }
 
   function guardarViajero(data, original) {
     setViajeros((p) => original
       ? p.map((v) => (v.rut === original.rut ? data : v))
       : [data, ...p]);
+    // Si cambió el rut (id del documento) hay que borrar el viejo en Firestore.
+    if (original && original.rut !== data.rut) {
+      borrarViajero(original.rut).catch(e => console.error(e));
+    }
+    persistirViajero(data).catch(e => console.error("Error guardando viajero:", e));
     setEditing(null); setCreating(false);
   }
   function guardarVehiculo(data, original) {
     setVehiculos((p) => original
       ? p.map((v) => (v.patente === original.patente ? data : v))
       : [data, ...p]);
+    if (original && original.patente !== data.patente) {
+      borrarVehiculo(original.patente).catch(e => console.error(e));
+    }
+    persistirVehiculo(data).catch(e => console.error("Error guardando vehículo:", e));
     setEditing(null); setCreating(false);
   }
 
@@ -1240,7 +1510,7 @@ function TramiteCard({ t, viajero, vehiculo, onClick, readOnly }) {
       <div style={S.tcName}>{viajero?.nombreCompleto}</div>
       <div style={S.tcMeta}>
         <span>{t.tipoViaje === "salida" ? "Salida" : "Entrada"}</span>
-        <span>·</span><span>{t.fechaHora}</span>
+        <span>·</span><span>{fmtFechaCL(t.fechaHora)}</span>
       </div>
       <div style={S.tcRow}>
         {vehiculo && <Tag icon={Car}>{vehiculo.patente}</Tag>}
@@ -1305,6 +1575,7 @@ function Banner({ tone, icon: Icon, title, text }) {
   const tones = {
     warn: { bg: "#fbf2cf", bd: "#e6cd7a", ink: "#7a5e16" },
     danger: { bg: "#f8dada", bd: "#e09a9a", ink: "#8a2727" },
+    ok: { bg: "#d8f0dd", bd: "#9fcead", ink: "#2f6b40" },
   }[tone];
   return (
     <div style={{ ...S.banner, background: tones.bg, borderColor: tones.bd, color: tones.ink }}>
@@ -1381,6 +1652,27 @@ function EmptyState({ text }) {
 function today() { return new Date().toISOString().slice(0, 10); }
 function nowStr() { const d = new Date(); return d.toISOString().slice(0, 10) + " " + d.toTimeString().slice(0, 5); }
 function addDays(iso, n) { const d = new Date(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+
+// DEF-W005: muestra fechas en formato chileno DD/MM/AAAA.
+// Acepta "2026-05-29" o "2026-05-29 08:40" y conserva la hora si viene.
+function fmtFechaCL(valor) {
+  if (!valor) return "—";
+  const [fecha, hora] = String(valor).split(" ");
+  const partes = fecha.split("-");
+  if (partes.length !== 3) return valor;
+  const [a, m, d] = partes;
+  return `${d}/${m}/${a}` + (hora ? ` ${hora}` : "");
+}
+
+// Dispara la descarga de un Blob como archivo.
+function descargar(blob, nombre) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = nombre;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 // ============================== ESTILOS ===============================
 function StyleTag() {
