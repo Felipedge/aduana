@@ -124,7 +124,81 @@ function consultarRegistroCivil(patente) {
   return { encontrado: true, ...datos };
 }
 
-// Generador de ID único para nuevos viajeros (simula RUT)
+// ---- Simulación PDI: validar antecedentes de personas (UC-09) ----
+// La PDI valida autorizaciones de menores y puede detectar antecedentes.
+// En producción sería una API REST. Aquí simulamos con datos de prueba.
+const PDI_ANTECEDENTES = {
+  "20.555.666-7": { tieneAntecedentes: true, motivo: "Orden de arraigo vigente — Tribunal de Familia", nivel: "alto" },
+  "19.888.999-0": { tieneAntecedentes: true, motivo: "Prohibición de salida del país (resolución judicial)", nivel: "critico" },
+};
+
+function consultarPDI(rut) {
+  const datos = PDI_ANTECEDENTES[(rut || "").trim()];
+  if (!datos) return { encontrado: true, tieneAntecedentes: false };
+  return { encontrado: true, ...datos };
+}
+
+// Validar autorización notarial con PDI (UC-02 → UC-09)
+function validarAutorizacionPDI(documento) {
+  // Simula validación: documentos con número de notaría "FALSA" son rechazados
+  if (!documento) return { valido: false, motivo: "Documento no proporcionado" };
+  if (documento.numeroNotaria && normalizar(documento.numeroNotaria).includes("falsa")) {
+    return { valido: false, motivo: "Documento inválido o falsificado según registros PDI" };
+  }
+  return { valido: true, motivo: "Documento verificado por PDI" };
+}
+
+// ---- Sistema de notificaciones (UC-08: Notificar Documento Listo) ----
+// Simula envío de email/SMS. En producción se integraría con un servicio real.
+let NOTIFICACIONES = [];
+
+function enviarNotificacion(destinatario, tipo, asunto, mensaje) {
+  const notif = {
+    id: NOTIFICACIONES.length + 1,
+    timestamp: nowStr(),
+    destinatario,
+    tipo, // "email" | "sms" | "sistema"
+    asunto,
+    mensaje,
+    leida: false,
+  };
+  NOTIFICACIONES.push(notif);
+  if (NOTIFICACIONES.length > 500) NOTIFICACIONES.shift();
+  return notif;
+}
+
+// Mensajes predefinidos del sistema
+function notificarTramiteCreado(viajero, tramite) {
+  return enviarNotificacion(
+    viajero.email || viajero.rut,
+    "email",
+    `Trámite #${tramite.idTramite} creado exitosamente`,
+    `Estimado/a ${viajero.nombreCompleto}: su trámite de ${tramite.tipoViaje} ha sido registrado. Código QR: ${tramite.qrCode}. Presente este código en el control fronterizo.`
+  );
+}
+
+function notificarProblemaLegal(viajero, tipo, detalle) {
+  return enviarNotificacion(
+    viajero.email || viajero.rut,
+    "sistema",
+    `⚠ Alerta: ${tipo}`,
+    `Se ha detectado un impedimento para ${viajero.nombreCompleto}: ${detalle}. Debe regularizar su situación antes de proceder.`
+  );
+}
+
+function notificarEstadoTramite(viajero, tramite, nuevoEstado) {
+  const mensajes = {
+    aprobado: `Su trámite #${tramite.idTramite} ha sido APROBADO. Puede presentarse en frontera con su código QR: ${tramite.qrCode}.`,
+    rechazado: `Su trámite #${tramite.idTramite} ha sido RECHAZADO. Motivo: ${tramite.observaciones || "Consulte con el funcionario de aduanas."}`,
+    en_revision: `Su trámite #${tramite.idTramite} está EN REVISIÓN. Un funcionario está validando su documentación.`,
+  };
+  return enviarNotificacion(
+    viajero.email || viajero.rut,
+    "email",
+    `Trámite #${tramite.idTramite} — ${nuevoEstado.toUpperCase()}`,
+    `Estimado/a ${viajero.nombreCompleto}: ${mensajes[nuevoEstado] || "Estado actualizado."}`
+  );
+}
 function generarRUTemporal() {
   return `EXT-${Math.floor(Math.random() * 1000000)}`;
 }
@@ -862,6 +936,7 @@ function ViajeroApp({ sesion, viajeros, vehiculos, tramites, setTramites }) {
         tabs={[
           { id: "inicio", label: "Mis trámites", icon: FileCheck },
           { id: "nuevo", label: "Nuevo trámite", icon: Plus },
+          { id: "notificaciones", label: "Notificaciones", icon: AlertTriangle },
         ]}
         active={view} onChange={setView}
       />
@@ -889,22 +964,62 @@ function ViajeroApp({ sesion, viajeros, vehiculos, tramites, setTramites }) {
 
       {view === "nuevo" && (
         <NuevoTramite
-          actor={actor} vehiculos={vehiculos}
+          actor={actor} vehiculos={vehiculos} viajeros={viajeros}
           onCreate={(t) => {
             guardarTramite(t).catch(e => console.error("Error guardando trámite:", e));
             setTramites((p) => [t, ...p]);
             registrarAuditoria(sesion, "CREAR_TRAMITE", { idTramite: t.idTramite, tipo: t.tipoViaje, viajeroRut: t.viajeroRut });
+            // UC-08: Notificar documento listo (email/SMS simulado)
+            notificarTramiteCreado(actor, t);
             setView("inicio");
           }}
           onCancel={() => setView("inicio")}
         />
       )}
+      {view === "notificaciones" && (
+        <PanelNotificaciones destinatario={actor.email || actor.rut} />
+      )}
     </main>
   );
 }
 
-// ---- Wizard de creación de trámite (TramiteFrontera.iniciarTramite) ----
-function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
+// ---- Panel de notificaciones del viajero ----
+function PanelNotificaciones({ destinatario }) {
+  const misNotifs = NOTIFICACIONES.filter((n) => n.destinatario === destinatario).reverse();
+  
+  return (
+    <div>
+      <div style={S.panel}>
+        <div style={S.panelHead}>
+          <h3 style={S.panelTitle}>Notificaciones ({misNotifs.length})</h3>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>Simulación de email/SMS del sistema</span>
+        </div>
+
+        {misNotifs.length === 0 ? (
+          <EmptyState text="No tienes notificaciones todavía. Se generarán al crear trámites o cuando un funcionario cambie el estado." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 1, marginTop: 16 }}>
+            {misNotifs.map((n) => (
+              <div key={n.id} style={{ ...S.adminRow, gap: 10, padding: "12px 14px", borderLeft: n.tipo === "sistema" ? "4px solid #9a2f2f" : "4px solid #013171" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", padding: "2px 6px", borderRadius: 4, background: n.tipo === "email" ? "#dbe8f8" : n.tipo === "sms" ? "#d8f0dd" : "#fbe8e8", color: n.tipo === "email" ? "#013171" : n.tipo === "sms" ? "#2f6b40" : "#9a2f2f" }}>
+                      {n.tipo}
+                    </span>
+                    <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "monospace" }}>{n.timestamp}</span>
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>{n.asunto}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>{n.mensaje}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+function NuevoTramite({ actor, vehiculos, viajeros, onCreate, onCancel }) {
   const [paso, setPaso] = useState(1);
   const [tipoViaje, setTipoViaje] = useState("salida");
   const [llevaVehiculo, setLlevaVehiculo] = useState(false);
@@ -943,6 +1058,21 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   const [rutApoderado, setRutApoderado] = useState("");
   const [numeroNotaria, setNumeroNotaria] = useState("");
   const [fechaNotaria, setFechaNotaria] = useState("");
+
+  // ---- Menores acompañantes (UC-02): adulto gestiona viaje con menor a cargo ----
+  const [viajaConMenor, setViajaConMenor] = useState(false);
+  const [menoresSeleccionados, setMenoresSeleccionados] = useState([]);
+  // Menores vinculados a este actor (tutorRut === actor.rut) o cualquier menor registrado
+  const menoresDisponibles = viajeros.filter((v) => v.esMenor && (v.tutorRut === actor.rut || !v.tutorRut));
+  
+  // Datos de autorización por cada menor seleccionado
+  const [autorizacionesMenores, setAutorizacionesMenores] = useState({});
+  function actualizarAutMenor(rutMenor, campo, valor) {
+    setAutorizacionesMenores((prev) => ({
+      ...prev,
+      [rutMenor]: { ...(prev[rutMenor] || {}), [campo]: valor },
+    }));
+  }
 
   const productoProhibido = tieneAlimentos && esProductoProhibido(tipoProducto);
   const totalPasos = 4;
@@ -1011,6 +1141,23 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
         nombreApoderado: apoderado || "—", rutApoderado: rutApoderado || "—",
         juzgadoFamilia: "—", fechaNotaria: fechaNotaria || today(),
         numeroNotaria: numeroNotaria || "—", tipoAutorizacion: "notarial",
+        menorRut: actor.rut, menorNombre: actor.nombreCompleto,
+      });
+    }
+    // UC-02: Autorización notarial por cada menor acompañante
+    if (viajaConMenor && menoresSeleccionados.length > 0) {
+      menoresSeleccionados.forEach((rutMenor) => {
+        const menor = viajeros.find((v) => v.rut === rutMenor);
+        const aut = autorizacionesMenores[rutMenor] || {};
+        documentos.push({
+          tipo: "AutorizacionNotarial", idDocumento: Math.floor(Math.random() * 9000) + 1000,
+          estado: "pendiente", fechaEmision: today(), fechaVencimiento: addDays(today(), 60),
+          nombreApoderado: aut.apoderado || actor.nombreCompleto,
+          rutApoderado: aut.rutApoderado || actor.rut,
+          juzgadoFamilia: "—", fechaNotaria: aut.fechaNotaria || today(),
+          numeroNotaria: aut.notaria || "—", tipoAutorizacion: "notarial",
+          menorRut: rutMenor, menorNombre: menor?.nombreCompleto || rutMenor,
+        });
       });
     }
     const nuevo = {
@@ -1026,7 +1173,7 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
   return (
     <div style={S.wizard}>
       <Stepper paso={paso} total={totalPasos}
-        labels={["Tipo de viaje", "Declaración SAG", actor.requiereAutorizacion ? "Autorización" : "Vehículo", "Confirmar"]} />
+        labels={["Tipo de viaje", "Declaración SAG", (actor.requiereAutorizacion || (viajaConMenor && menoresSeleccionados.length > 0)) ? "Autorización" : "Vehículo", "Confirmar"]} />
 
       {/* Validación 1 (DEF-A002, RN-05 a RN-09): gestor menor de edad */}
       {tutorMenorDeEdad && (
@@ -1039,6 +1186,38 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
           <RadioRow value={tipoViaje} onChange={setTipoViaje}
             options={[{ v: "salida", l: "Salida del país" }, { v: "entrada", l: "Entrada al país" }]} />
           <Toggle label="Viajo con vehículo" checked={llevaVehiculo} onChange={setLlevaVehiculo} />
+
+          {/* UC-02: Adulto viaja con menor a cargo */}
+          {!actor.esMenor && menoresDisponibles.length > 0 && (
+            <>
+              <Toggle label="Viajo con menor de edad a mi cargo" checked={viajaConMenor} onChange={(v) => { setViajaConMenor(v); if (!v) setMenoresSeleccionados([]); }} />
+              {viajaConMenor && (
+                <div style={{ marginTop: 8, padding: 12, background: "var(--surface)", borderRadius: 10, border: "1px solid var(--line)" }}>
+                  <p style={{ ...S.muted, marginBottom: 8 }}>Selecciona los menores que viajan contigo. Se generará una Autorización Notarial (simulada) por cada uno.</p>
+                  {menoresDisponibles.map((m) => {
+                    const sel = menoresSeleccionados.includes(m.rut);
+                    return (
+                      <div key={m.rut} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+                        <input type="checkbox" checked={sel} onChange={() => {
+                          setMenoresSeleccionados((prev) => sel ? prev.filter((r) => r !== m.rut) : [...prev, m.rut]);
+                        }} />
+                        <div>
+                          <span style={{ fontWeight: 700, fontSize: 13 }}>{m.nombreCompleto}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>
+                            {m.rut} · {calcularEdadAnios(m.fechaNacimiento)} años
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {viajaConMenor && menoresSeleccionados.length === 0 && (
+                    <Banner tone="warn" icon={AlertTriangle} title="Selecciona al menos un menor"
+                      text="Debes seleccionar al menos un menor de edad para generar la autorización." />
+                  )}
+                </div>
+              )}
+            </>
+          )}
           {llevaVehiculo && (
             <>
               <Field label="Patente del vehículo">
@@ -1144,7 +1323,45 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
           <Field label="Fecha de notaría"><input type="date" style={S.input} value={fechaNotaria} onChange={(e) => setFechaNotaria(e.target.value)} /></Field>
         </FormBlock>
       )}
-      {paso === 3 && !actor.requiereAutorizacion && (
+
+      {/* UC-02: Adulto gestiona autorización notarial para menores a su cargo */}
+      {paso === 3 && !actor.requiereAutorizacion && viajaConMenor && menoresSeleccionados.length > 0 && (
+        <FormBlock title="Autorización Notarial — Menores a cargo" sub="AutorizacionNotarial — documento simulado por cada menor">
+          <Banner tone="warn" icon={Stamp} title="Documento requerido por PDI"
+            text="Cada menor necesita una autorización notarial firmada ante notario para poder cruzar la frontera. Este documento será validado con la PDI." />
+          {menoresSeleccionados.map((rutMenor) => {
+            const menor = viajeros.find((v) => v.rut === rutMenor);
+            if (!menor) return null;
+            const aut = autorizacionesMenores[rutMenor] || {};
+            return (
+              <div key={rutMenor} style={{ marginTop: 16, padding: 14, background: "#f8f4ff", borderRadius: 10, border: "1px solid #d4c4ee" }}>
+                <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 10, color: "#5e3a82" }}>
+                  {menor.nombreCompleto} ({menor.rut}) — {calcularEdadAnios(menor.fechaNacimiento)} años
+                </p>
+                <Field label="Nombre del apoderado/tutor">
+                  <input style={S.input} value={aut.apoderado || actor.nombreCompleto}
+                    onChange={(e) => actualizarAutMenor(rutMenor, "apoderado", e.target.value)} />
+                </Field>
+                <Field label="RUT del apoderado">
+                  <input style={S.input} value={aut.rutApoderado || actor.rut}
+                    onChange={(e) => actualizarAutMenor(rutMenor, "rutApoderado", e.target.value)} />
+                </Field>
+                <Field label="Notaría">
+                  <input style={S.input} value={aut.notaria || ""}
+                    onChange={(e) => actualizarAutMenor(rutMenor, "notaria", e.target.value)}
+                    placeholder="ej: Notaría 12 Santiago" />
+                </Field>
+                <Field label="Fecha de notaría">
+                  <input type="date" style={S.input} value={aut.fechaNotaria || ""}
+                    onChange={(e) => actualizarAutMenor(rutMenor, "fechaNotaria", e.target.value)} />
+                </Field>
+              </div>
+            );
+          })}
+        </FormBlock>
+      )}
+
+      {paso === 3 && !actor.requiereAutorizacion && (!viajaConMenor || menoresSeleccionados.length === 0) && (
         <FormBlock title="Vehículo" sub="FormularioVehiculoAcuerdo">
           {llevaVehiculo
             ? <>
@@ -1172,8 +1389,18 @@ function NuevoTramite({ actor, vehiculos, onCreate, onCancel }) {
               "Declaración SAG",
               llevaVehiculo && "Formulario Vehículo",
               actor.requiereAutorizacion && "Autorización Notarial",
+              viajaConMenor && menoresSeleccionados.length > 0 && `Autorización Notarial (${menoresSeleccionados.length} menor${menoresSeleccionados.length > 1 ? "es" : ""})`,
             ].filter(Boolean).join(", ")
           } />
+          {viajaConMenor && menoresSeleccionados.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#5e3a82" }}>Menores acompañantes:</span>
+              {menoresSeleccionados.map((rutMenor) => {
+                const menor = viajeros.find((v) => v.rut === rutMenor);
+                return <ResumenLine key={rutMenor} k={menor?.nombreCompleto || rutMenor} v={`${rutMenor} · ${calcularEdadAnios(menor?.fechaNacimiento)} años · Autorización notarial incluida`} />;
+              })}
+            </div>
+          )}
           <p style={{ ...S.muted, marginTop: 12 }}>
             Al confirmar, el trámite queda en estado <b>pendiente</b> a la espera de revisión por un funcionario.
           </p>
@@ -1248,6 +1475,32 @@ function EscaneoQRFrontera({ qrCode, setQrCode, tramites, viajeros, vehiculos })
             {tramiteEncontrado.vehiculoPatente && <KV k="Vehículo" v={tramiteEncontrado.vehiculoPatente} />}
           </div>
 
+          {/* Validación PDI de antecedentes de la persona */}
+          {(() => {
+            const resPDI = consultarPDI(tramiteEncontrado.viajeroRut);
+            if (resPDI.tieneAntecedentes) {
+              return (
+                <Banner tone="danger" icon={XCircle}
+                  title={`⚠ ALERTA PDI — Persona con impedimento legal (${resPDI.nivel})`}
+                  text={`${resPDI.motivo}. NO se permite el cruce fronterizo. Derivar a oficina de PDI.`} />
+              );
+            }
+            return null;
+          })()}
+
+          {/* Validación de vehículo con Registro Civil */}
+          {tramiteEncontrado.vehiculoPatente && (() => {
+            const resRC = consultarRegistroCivil(tramiteEncontrado.vehiculoPatente);
+            if (resRC.encontrado && resRC.tieneRestricciones) {
+              return (
+                <Banner tone="danger" icon={XCircle}
+                  title="⚠ ALERTA REGISTRO CIVIL — Vehículo con impedimento legal"
+                  text={`${resRC.causal}. NO se permite la salida del vehículo. Derivar a oficina de Registro Civil.`} />
+              );
+            }
+            return null;
+          })()}
+
           {/* Validación de documentos */}
           <div style={{ ...S.panel, marginTop: 16, borderLeft: "4px solid #013171" }}>
             <h3 style={S.panelTitle}>Validación de documentos</h3>
@@ -1316,7 +1569,12 @@ function FuncionarioApp({ sesion, viajeros, vehiculos, tramites, setTramites }) 
           : t
       );
       const modificado = actualizados.find((t) => t.idTramite === idTramite);
-      if (modificado) guardarTramite(modificado).catch(e => console.error("Error actualizando trámite:", e));
+      if (modificado) {
+        guardarTramite(modificado).catch(e => console.error("Error actualizando trámite:", e));
+        // Notificar al viajero del cambio de estado
+        const viajero = viajeros.find((v) => v.rut === modificado.viajeroRut);
+        if (viajero) notificarEstadoTramite(viajero, modificado, estado);
+      }
       return actualizados;
     });
     // Auditoría: registrar cambio de estado
