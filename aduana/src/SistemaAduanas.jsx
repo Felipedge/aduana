@@ -1404,6 +1404,11 @@ function NuevoTramite({ actor, vehiculos, viajeros, onCreate, onCancel }) {
           <p style={{ ...S.muted, marginTop: 12 }}>
             Al confirmar, el trámite queda en estado <b>pendiente</b> a la espera de revisión por un funcionario.
           </p>
+          <div style={{ marginTop: 16, padding: 16, background: "#f0f4fa", borderRadius: 12, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#013171" }}>Tu código QR será:</span>
+            <QRCodeImg value={`QR-AD-${String(TRAMITE_SEQ + 1).padStart(4, "0")}`} size={140} />
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>Presenta este código en el control fronterizo</span>
+          </div>
         </FormBlock>
       )}
 
@@ -1669,6 +1674,10 @@ function RevisionDrawer({ t, sesion, viajero, vehiculo, onClose, onAprobar, onRe
         </div>
 
         <EstadoPill estado={t.estado} />
+
+        <div style={{ display: "flex", justifyContent: "center", margin: "12px 0" }}>
+          <QRCodeImg value={t.qrCode} size={100} />
+        </div>
 
         <Section title="Viajero">
           <KV k="RUT" v={viajero?.rut} />
@@ -2327,6 +2336,18 @@ function SectionTabs({ tabs, active, onChange, actorLabel, actorPicker }) {
   );
 }
 
+// ---- Generador de imagen QR real usando api.qrserver.com (gratuito, sin API key) ----
+function QRCodeImg({ value, size = 120 }) {
+  const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(value)}`;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+      <img src={url} alt={`QR: ${value}`} width={size} height={size}
+        style={{ borderRadius: 8, border: "2px solid var(--line)" }} />
+      <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--muted)" }}>{value}</span>
+    </div>
+  );
+}
+
 function TramiteCard({ t, viajero, vehiculo, onClick, readOnly }) {
   return (
     <button onClick={onClick} className="tramiteCard"
@@ -2348,7 +2369,7 @@ function TramiteCard({ t, viajero, vehiculo, onClick, readOnly }) {
         })}
       </div>
       <div style={S.tcFoot}>
-        <span style={S.qrBadge}><QrCode size={13} /> {t.qrCode}</span>
+        <QRCodeImg value={t.qrCode} size={80} />
         {!readOnly && <span style={S.tcAction}>Revisar <ChevronRight size={14} /></span>}
         {readOnly && <span style={{ ...S.muted, fontSize: 12 }}><Clock size={12} /> ~{t.tiempoEstimado} min</span>}
       </div>
